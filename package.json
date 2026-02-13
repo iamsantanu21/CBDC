@@ -1,0 +1,22 @@
+{
+  "name": "cbdc-multi-node-system",
+  "version": "1.0.0",
+  "description": "Multi-node Central Bank Digital Currency System",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "install:all": "npm install && cd central-bank && npm install && cd ../fi-node && npm install && cd ../web-dashboard && npm install",
+    "start:central-bank": "cd central-bank && npm start",
+    "start:fi1": "cd fi-node && FI_PORT=4001 FI_NAME=FI-Alpha FI_ID=fi-001 npm start",
+    "start:fi2": "cd fi-node && FI_PORT=4002 FI_NAME=FI-Beta FI_ID=fi-002 npm start",
+    "start:dashboard": "cd web-dashboard && npm run dev",
+    "start:all": "concurrently \"npm run start:central-bank\" \"sleep 2 && npm run start:fi1\" \"sleep 2 && npm run start:fi2\" \"npm run start:dashboard\"",
+    "dev": "npm run start:all"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "keywords": ["cbdc", "central-bank", "digital-currency", "blockchain"],
+  "author": "",
+  "license": "MIT"
+}
