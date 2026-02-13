@@ -1,6 +1,8 @@
 import express from 'express';
 import { 
   getLedger, 
+  getLedgerFiltered,
+  getIoTTransactionStats,
   syncTransactions, 
   getSystemStats, 
   routeCrossFITransaction, 
@@ -34,6 +36,55 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Get filtered ledger entries
+router.get('/filter', async (req, res) => {
+  try {
+    const { fi_id, is_iot, transaction_type, wallet_id, device_id, from_date, to_date, limit } = req.query;
+    
+    const filters = {};
+    if (fi_id) filters.fi_id = fi_id;
+    if (is_iot !== undefined) filters.is_iot_transaction = is_iot === 'true';
+    if (transaction_type) filters.transaction_type = transaction_type;
+    if (wallet_id) filters.wallet_id = wallet_id;
+    if (device_id) filters.device_id = device_id;
+    if (from_date) filters.from_date = from_date;
+    if (to_date) filters.to_date = to_date;
+    if (limit) filters.limit = parseInt(limit);
+    
+    const ledger = await getLedgerFiltered(filters);
+    res.json({ success: true, ledger, count: ledger.length });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get IoT transactions only
+router.get('/iot', async (req, res) => {
+  try {
+    const { fi_id, device_id, limit } = req.query;
+    
+    const filters = { is_iot_transaction: true };
+    if (fi_id) filters.fi_id = fi_id;
+    if (device_id) filters.device_id = device_id;
+    if (limit) filters.limit = parseInt(limit);
+    
+    const transactions = await getLedgerFiltered(filters);
+    res.json({ success: true, transactions, count: transactions.length });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get IoT transaction statistics
+router.get('/iot/stats', async (req, res) => {
+  try {
+    const stats = await getIoTTransactionStats();
+    res.json({ success: true, ...stats });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Sync transactions from FI
 router.post('/sync', async (req, res) => {
   try {
@@ -54,13 +105,23 @@ router.post('/sync', async (req, res) => {
 // Route cross-FI transaction
 router.post('/cross-fi', async (req, res) => {
   try {
-    const { sourceFiId, sourceFiName, targetFiId, targetFiName, fromWallet, toWallet, amount, description, zkpProof } = req.body;
+    const { sourceFiId, sourceFiName, targetFiId, targetFiName, fromWallet, toWallet, toSubWallet, amount, description, zkpProof, recipientType } = req.body;
     
     if ((!sourceFiId && !sourceFiName) || (!targetFiId && !targetFiName)) {
       return res.status(400).json({ error: 'Source and target FI (ID or name) are required' });
     }
-    if (!fromWallet || !toWallet || !amount) {
-      return res.status(400).json({ error: 'fromWallet, toWallet, and amount are required' });
+    if (!fromWallet || !amount) {
+      return res.status(400).json({ error: 'fromWallet and amount are required' });
+    }
+    // Validate recipient based on type
+    if (recipientType === 'subwallet') {
+      if (!toWallet || !toSubWallet) {
+        return res.status(400).json({ error: 'toWallet and toSubWallet are required for sub-wallet transfers' });
+      }
+    } else {
+      if (!toWallet) {
+        return res.status(400).json({ error: 'toWallet is required' });
+      }
     }
     
     // Resolve source FI ID from name if needed
@@ -93,26 +154,39 @@ router.post('/cross-fi', async (req, res) => {
       zkpProof
     );
     
+    const isSubWalletTransfer = recipientType === 'subwallet';
     console.log(`🔄 Cross-FI Transaction Routed: ${result.sourceFi.name} → ${result.targetFi.name}`);
-    console.log(`   💸 ${fromWallet} → ${toWallet} : ₹${amount}`);
+    console.log(`   💸 ${fromWallet} → ${toWallet}${isSubWalletTransfer ? '/' + toSubWallet : ''} : ₹${amount}`);
     
     // Attempt to notify target FI
     if (result.targetFi.endpoint) {
       try {
-        await fetch(`${result.targetFi.endpoint}/api/transaction/receive-cross-fi`, {
+        // Choose endpoint based on recipient type
+        const endpoint = isSubWalletTransfer 
+          ? `${result.targetFi.endpoint}/api/transaction/receive-cross-fi-subwallet`
+          : `${result.targetFi.endpoint}/api/transaction/receive-cross-fi`;
+        
+        const payload = {
+          transactionId: result.transactionId,
+          sourceFi: result.sourceFi,
+          fromWallet: result.fromWallet,
+          toWallet: result.toWallet,
+          amount: result.amount,
+          description: result.description,
+          zkpProof: result.zkpProof
+        };
+        
+        // Add sub-wallet ID for sub-wallet transfers
+        if (isSubWalletTransfer) {
+          payload.toSubWallet = toSubWallet;
+        }
+        
+        await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            transactionId: result.transactionId,
-            sourceFi: result.sourceFi,
-            fromWallet: result.fromWallet,
-            toWallet: result.toWallet,
-            amount: result.amount,
-            description: result.description,
-            zkpProof: result.zkpProof
-          })
+          body: JSON.stringify(payload)
         });
-        console.log(`   ✅ Target FI notified`);
+        console.log(`   ✅ Target FI notified${isSubWalletTransfer ? ' (sub-wallet)' : ''}`);
       } catch (e) {
         console.log(`   ⚠️ Could not notify target FI: ${e.message}`);
       }

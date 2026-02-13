@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Building2, Wallet, ArrowLeftRight, RefreshCw, Plus, Send, DollarSign, Activity, Server, ArrowLeft, User, CreditCard, Wifi, WifiOff, Watch, Smartphone, Radio, Shield, CheckCircle, XCircle, Clock, Cpu } from 'lucide-react';
+import { Building2, Wallet, ArrowLeftRight, RefreshCw, Plus, Send, DollarSign, Activity, Server, ArrowLeft, User, CreditCard, Wifi, WifiOff, Watch, Smartphone, Radio, Shield, CheckCircle, XCircle, Clock, Cpu, AlertTriangle, Lock, Unlock, Eye, Bell, ChevronDown, History, ArrowDownLeft, ArrowUpRight } from 'lucide-react';
 import { centralBankApi, fi1Api, fi2Api, getOtherFIName, getFIApi } from './services/api';
 
 // Format currency in Rupees
@@ -14,6 +14,31 @@ function CentralBankDashboard() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [allocateForm, setAllocateForm] = useState({ fiId: '', amount: '', description: '' });
+  
+  // Compliance Control State
+  const [complianceDashboard, setComplianceDashboard] = useState(null);
+  const [alerts, setAlerts] = useState([]);
+  const [watchlist, setWatchlist] = useState([]);
+  const [frozenEntities, setFrozenEntities] = useState([]);
+  const [rules, setRules] = useState([]);
+  const [showCompliance, setShowCompliance] = useState(true);
+  const [freezeForm, setFreezeForm] = useState({ entityType: 'wallet', entityId: '', fiId: '', reason: '' });
+  const [watchlistForm, setWatchlistForm] = useState({ entityType: 'wallet', entityId: '', fiId: '', status: 'watching', reason: '', riskLevel: 'medium' });
+  const [ruleForm, setRuleForm] = useState({
+    id: '',
+    rule_name: '',
+    rule_type: 'limit',
+    target_type: 'wallet',
+    limit_value: '',
+    daily_limit: '',
+    monthly_limit: '',
+    max_offline_amount: '',
+    max_offline_count: '',
+    description: '',
+    is_active: true
+  });
+  const [editingRule, setEditingRule] = useState(false);
+  const [ledgerFilter, setLedgerFilter] = useState('all'); // all, allocation, wallet, iot
 
   const fetchData = async () => {
     setLoading(true);
@@ -26,6 +51,24 @@ function CentralBankDashboard() {
       setStats(statsRes.stats);
       setFIs(fisRes.fis || []);
       setLedger(ledgerRes.ledger || []);
+      
+      // Fetch compliance data
+      try {
+        const [dashboardRes, alertsRes, watchlistRes, frozenRes, rulesRes] = await Promise.all([
+          centralBankApi.getComplianceDashboard(),
+          centralBankApi.getAlerts({ unresolved_only: true, limit: 20 }),
+          centralBankApi.getWatchlist(),
+          centralBankApi.getFrozenEntities(),
+          centralBankApi.getComplianceRules(null, false)
+        ]);
+        setComplianceDashboard(dashboardRes.dashboard);
+        setAlerts(alertsRes.alerts || []);
+        setWatchlist(watchlistRes.watchlist || []);
+        setFrozenEntities(frozenRes.frozen || []);
+        setRules(rulesRes.rules || []);
+      } catch (compErr) {
+        console.log('Compliance data fetch error:', compErr);
+      }
     } catch (error) {
       console.error('Error fetching data:', error);
     } finally {
@@ -49,6 +92,149 @@ function CentralBankDashboard() {
     } catch (err) {
       alert('Error allocating funds: ' + err.message);
     }
+  };
+
+  // Compliance Control Handlers
+  const handleFreezeEntity = async (e) => {
+    e.preventDefault();
+    try {
+      await centralBankApi.freezeEntity(
+        freezeForm.entityType, 
+        freezeForm.entityId, 
+        freezeForm.fiId || null, 
+        freezeForm.reason
+      );
+      setFreezeForm({ entityType: 'wallet', entityId: '', fiId: '', reason: '' });
+      fetchData();
+      alert(`${freezeForm.entityType === 'wallet' ? 'Wallet' : 'Device'} frozen successfully!`);
+    } catch (err) {
+      alert('Error freezing entity: ' + err.message);
+    }
+  };
+
+  const handleUnfreeze = async (entityType, entityId, fiId) => {
+    if (!confirm(`Are you sure you want to unfreeze ${entityId}?`)) return;
+    try {
+      await centralBankApi.unfreezeEntity(entityType, entityId, fiId);
+      fetchData();
+      alert('Entity unfrozen successfully!');
+    } catch (err) {
+      alert('Error unfreezing entity: ' + err.message);
+    }
+  };
+
+  const handleAddToWatchlist = async (e) => {
+    e.preventDefault();
+    try {
+      await centralBankApi.addToWatchlist(
+        watchlistForm.entityType,
+        watchlistForm.entityId,
+        watchlistForm.fiId || null,
+        watchlistForm.status,
+        watchlistForm.reason,
+        watchlistForm.riskLevel
+      );
+      setWatchlistForm({ entityType: 'wallet', entityId: '', fiId: '', status: 'watching', reason: '', riskLevel: 'medium' });
+      fetchData();
+      alert('Added to watchlist successfully!');
+    } catch (err) {
+      alert('Error adding to watchlist: ' + err.message);
+    }
+  };
+
+  const handleRemoveFromWatchlist = async (entityType, entityId, fiId) => {
+    if (!confirm(`Remove ${entityId} from watchlist?`)) return;
+    try {
+      await centralBankApi.removeFromWatchlist(entityType, entityId, fiId);
+      fetchData();
+      alert('Removed from watchlist!');
+    } catch (err) {
+      alert('Error removing from watchlist: ' + err.message);
+    }
+  };
+
+  const handleResolveAlert = async (alertId) => {
+    try {
+      await centralBankApi.resolveAlert(alertId);
+      fetchData();
+    } catch (err) {
+      alert('Error resolving alert: ' + err.message);
+    }
+  };
+
+  // Compliance Rule Handlers
+  const handleCreateOrUpdateRule = async (e) => {
+    e.preventDefault();
+    try {
+      const ruleData = {
+        rule_name: ruleForm.rule_name,
+        rule_type: ruleForm.rule_type,
+        target_type: ruleForm.target_type,
+        limit_value: ruleForm.limit_value ? parseFloat(ruleForm.limit_value) : null,
+        daily_limit: ruleForm.daily_limit ? parseFloat(ruleForm.daily_limit) : null,
+        monthly_limit: ruleForm.monthly_limit ? parseFloat(ruleForm.monthly_limit) : null,
+        max_offline_amount: ruleForm.max_offline_amount ? parseFloat(ruleForm.max_offline_amount) : null,
+        max_offline_count: ruleForm.max_offline_count ? parseInt(ruleForm.max_offline_count) : null,
+        description: ruleForm.description,
+        is_active: ruleForm.is_active
+      };
+      
+      if (editingRule && ruleForm.id) {
+        ruleData.id = ruleForm.id;
+      }
+      
+      await centralBankApi.setComplianceRule(ruleData);
+      resetRuleForm();
+      fetchData();
+      alert(`Compliance rule ${editingRule ? 'updated' : 'created'} successfully!`);
+    } catch (err) {
+      alert('Error saving rule: ' + err.message);
+    }
+  };
+
+  const handleEditRule = (rule) => {
+    setRuleForm({
+      id: rule.id,
+      rule_name: rule.rule_name || '',
+      rule_type: rule.rule_type || 'limit',
+      target_type: rule.target_type || 'wallet',
+      limit_value: rule.limit_value?.toString() || '',
+      daily_limit: rule.daily_limit?.toString() || '',
+      monthly_limit: rule.monthly_limit?.toString() || '',
+      max_offline_amount: rule.max_offline_amount?.toString() || '',
+      max_offline_count: rule.max_offline_count?.toString() || '',
+      description: rule.description || '',
+      is_active: rule.is_active !== 0
+    });
+    setEditingRule(true);
+  };
+
+  const handleDeleteRule = async (ruleId) => {
+    if (!confirm('Are you sure you want to delete this compliance rule?')) return;
+    try {
+      await centralBankApi.deleteComplianceRule(ruleId);
+      fetchData();
+      alert('Rule deleted successfully!');
+    } catch (err) {
+      alert('Error deleting rule: ' + err.message);
+    }
+  };
+
+  const resetRuleForm = () => {
+    setRuleForm({
+      id: '',
+      rule_name: '',
+      rule_type: 'limit',
+      target_type: 'wallet',
+      limit_value: '',
+      daily_limit: '',
+      monthly_limit: '',
+      max_offline_amount: '',
+      max_offline_count: '',
+      description: '',
+      is_active: true
+    });
+    setEditingRule(false);
   };
 
   return (
@@ -130,9 +316,12 @@ function CentralBankDashboard() {
               className="border-2 border-gray-200 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none"
               required
             >
-              <option value="">Select Financial Institution</option>
+              <option value="">Select Bank</option>
               {fis.map((fi) => (
-                <option key={fi.id} value={fi.id}>{fi.name}</option>
+                <option key={fi.id} value={fi.id}>
+                  {fi.name === 'FI-Alpha' || fi.name === 'SBI' ? '🏦 State Bank of India (SBI)' : 
+                   fi.name === 'FI-Beta' || fi.name === 'HDFC' ? '🏦 HDFC Bank' : fi.name}
+                </option>
               ))}
             </select>
             <div className="relative">
@@ -182,10 +371,22 @@ function CentralBankDashboard() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
-                {fis.map((fi) => (
+                {fis.map((fi) => {
+                  const isSBI = fi.name === 'FI-Alpha' || fi.name === 'SBI';
+                  const isHDFC = fi.name === 'FI-Beta' || fi.name === 'HDFC';
+                  const displayName = isSBI ? 'State Bank of India (SBI)' : isHDFC ? 'HDFC Bank' : fi.name;
+                  return (
                   <tr key={fi.id} className="hover:bg-gray-50">
                     <td className="px-6 py-4 text-sm font-mono text-gray-600">{fi.id}</td>
-                    <td className="px-6 py-4 font-medium text-gray-900">{fi.name}</td>
+                    <td className="px-6 py-4 font-medium text-gray-900 flex items-center space-x-2">
+                      {isSBI && (
+                        <img src="https://upload.wikimedia.org/wikipedia/en/thumb/5/58/State_Bank_of_India_logo.svg/200px-State_Bank_of_India_logo.svg.png" alt="SBI" className="w-6 h-6 object-contain" onError={(e) => e.target.style.display='none'} />
+                      )}
+                      {isHDFC && (
+                        <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/2/28/HDFC_Bank_Logo.svg/200px-HDFC_Bank_Logo.svg.png" alt="HDFC" className="w-6 h-6 object-contain" onError={(e) => e.target.style.display='none'} />
+                      )}
+                      <span>{displayName}</span>
+                    </td>
                     <td className="px-6 py-4 text-sm font-semibold text-green-600">{formatRupees(fi.allocated_funds)}</td>
                     <td className="px-6 py-4 text-sm font-semibold text-blue-600">{formatRupees(fi.available_balance)}</td>
                     <td className="px-6 py-4">
@@ -196,7 +397,8 @@ function CentralBankDashboard() {
                       </span>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
                 {fis.length === 0 && (
                   <tr>
                     <td colSpan="5" className="px-6 py-12 text-center text-gray-500">
@@ -209,50 +411,629 @@ function CentralBankDashboard() {
           </div>
         </div>
 
-        {/* Allocation History */}
+        {/* Complete Transaction Ledger */}
         <div className="bg-white rounded-xl shadow-lg">
           <div className="px-6 py-4 border-b border-gray-200">
-            <h2 className="text-xl font-bold text-gray-800">Allocation History (Ledger)</h2>
+            <div className="flex items-center justify-between">
+              <h2 className="text-xl font-bold text-gray-800">📒 Complete Transaction Ledger</h2>
+              <div className="flex space-x-2">
+                <button
+                  onClick={() => setLedgerFilter('all')}
+                  className={`px-3 py-1 rounded-full text-sm font-medium transition-all ${
+                    ledgerFilter === 'all' ? 'bg-gray-800 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }`}
+                >
+                  All ({ledger.length})
+                </button>
+                <button
+                  onClick={() => setLedgerFilter('allocation')}
+                  className={`px-3 py-1 rounded-full text-sm font-medium transition-all ${
+                    ledgerFilter === 'allocation' ? 'bg-green-600 text-white' : 'bg-green-100 text-green-700 hover:bg-green-200'
+                  }`}
+                >
+                  Allocations ({ledger.filter(e => e.transaction_type === 'allocation').length})
+                </button>
+                <button
+                  onClick={() => setLedgerFilter('wallet')}
+                  className={`px-3 py-1 rounded-full text-sm font-medium transition-all ${
+                    ledgerFilter === 'wallet' ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                  }`}
+                >
+                  Wallet Txns ({ledger.filter(e => ['credit', 'debit', 'transfer'].includes(e.transaction_type)).length})
+                </button>
+                <button
+                  onClick={() => setLedgerFilter('iot')}
+                  className={`px-3 py-1 rounded-full text-sm font-medium transition-all ${
+                    ledgerFilter === 'iot' ? 'bg-purple-600 text-white' : 'bg-purple-100 text-purple-700 hover:bg-purple-200'
+                  }`}
+                >
+                  IoT ({ledger.filter(e => e.is_iot_transaction || e.transaction_type === 'iot_offline').length})
+                </button>
+              </div>
+            </div>
           </div>
-          <div className="overflow-x-auto max-h-96">
+          <div className="overflow-x-auto max-h-[500px]">
             <table className="w-full">
               <thead className="bg-gray-50 sticky top-0">
                 <tr>
-                  <th className="px-6 py-4 text-left text-sm font-semibold text-gray-600">Date & Time</th>
-                  <th className="px-6 py-4 text-left text-sm font-semibold text-gray-600">FI Name</th>
-                  <th className="px-6 py-4 text-left text-sm font-semibold text-gray-600">Type</th>
-                  <th className="px-6 py-4 text-left text-sm font-semibold text-gray-600">Amount</th>
-                  <th className="px-6 py-4 text-left text-sm font-semibold text-gray-600">Description</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">Date & Time</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">FI</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">Type</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">From</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">To</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">Amount</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">Device/Source</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600">Description</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
-                {ledger.map((entry) => (
-                  <tr key={entry.id} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 text-sm text-gray-600">
+                {ledger
+                  .filter(entry => {
+                    if (ledgerFilter === 'all') return true;
+                    if (ledgerFilter === 'allocation') return entry.transaction_type === 'allocation';
+                    if (ledgerFilter === 'wallet') return ['credit', 'debit', 'transfer'].includes(entry.transaction_type);
+                    if (ledgerFilter === 'iot') return entry.is_iot_transaction || entry.transaction_type === 'iot_offline';
+                    return true;
+                  })
+                  .map((entry) => (
+                  <tr key={entry.id} className={`hover:bg-gray-50 ${
+                    entry.is_iot_transaction || entry.transaction_type === 'iot_offline' ? 'bg-purple-50' : ''
+                  }`}>
+                    <td className="px-4 py-3 text-xs text-gray-600">
                       {new Date(entry.timestamp).toLocaleString('en-IN')}
                     </td>
-                    <td className="px-6 py-4 font-medium text-gray-900">{entry.fi_name || entry.fi_id}</td>
-                    <td className="px-6 py-4">
-                      <span className={`px-3 py-1 rounded-full text-xs font-medium ${
-                        entry.transaction_type === 'allocation' ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800'
+                    <td className="px-4 py-3 text-xs font-medium text-gray-900">{entry.fi_name || entry.fi_id}</td>
+                    <td className="px-4 py-3">
+                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                        entry.transaction_type === 'allocation' ? 'bg-green-100 text-green-800' :
+                        entry.transaction_type === 'credit' ? 'bg-blue-100 text-blue-800' :
+                        entry.transaction_type === 'debit' ? 'bg-red-100 text-red-800' :
+                        entry.transaction_type === 'transfer' ? 'bg-yellow-100 text-yellow-800' :
+                        entry.transaction_type === 'iot_offline' ? 'bg-purple-100 text-purple-800' :
+                        'bg-gray-100 text-gray-800'
                       }`}>
-                        {entry.transaction_type}
+                        {entry.transaction_type === 'iot_offline' ? '📡 IoT' : entry.transaction_type}
                       </span>
+                      {entry.is_iot_transaction === 1 && (
+                        <span className="ml-1 px-2 py-1 rounded-full text-xs bg-purple-200 text-purple-800">IoT</span>
+                      )}
                     </td>
-                    <td className="px-6 py-4 text-sm font-semibold text-green-600">{formatRupees(entry.amount)}</td>
-                    <td className="px-6 py-4 text-sm text-gray-500">{entry.description || '-'}</td>
+                    <td className="px-4 py-3 text-xs">
+                      {entry.from_wallet ? (
+                        <span className="font-mono bg-gray-100 px-2 py-1 rounded text-gray-700">
+                          {entry.from_wallet.substring(0, 12)}...
+                        </span>
+                      ) : (
+                        <span className="text-gray-400">-</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-xs">
+                      {entry.to_wallet ? (
+                        <span className="font-mono bg-gray-100 px-2 py-1 rounded text-gray-700">
+                          {entry.to_wallet.substring(0, 12)}...
+                        </span>
+                      ) : (
+                        <span className="text-gray-400">-</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-sm font-semibold text-green-600">{formatRupees(entry.amount)}</td>
+                    <td className="px-4 py-3 text-xs">
+                      {entry.device_id ? (
+                        <span className="flex items-center">
+                          <Smartphone className="h-3 w-3 mr-1 text-purple-600" />
+                          <span className="font-mono text-purple-700">{entry.device_id.substring(0, 10)}...</span>
+                        </span>
+                      ) : entry.main_wallet_id ? (
+                        <span className="flex items-center">
+                          <Wallet className="h-3 w-3 mr-1 text-blue-600" />
+                          <span className="font-mono text-blue-700">{entry.main_wallet_id.substring(0, 10)}...</span>
+                        </span>
+                      ) : (
+                        <span className="text-gray-400">Direct</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-xs text-gray-500 max-w-xs truncate">{entry.description || '-'}</td>
                   </tr>
                 ))}
                 {ledger.length === 0 && (
                   <tr>
-                    <td colSpan="5" className="px-6 py-12 text-center text-gray-500">
-                      No allocations yet
+                    <td colSpan="8" className="px-6 py-12 text-center text-gray-500">
+                      No transactions yet. Allocate funds to FIs and they will sync transactions here.
                     </td>
                   </tr>
                 )}
               </tbody>
             </table>
           </div>
+          {/* Ledger Summary */}
+          <div className="px-6 py-3 bg-gray-50 border-t border-gray-200 flex items-center justify-between text-sm">
+            <div className="flex space-x-6">
+              <span className="text-gray-600">
+                Total: <span className="font-semibold text-gray-900">{ledger.length}</span> entries
+              </span>
+              <span className="text-green-600">
+                Allocations: <span className="font-semibold">{formatRupees(ledger.filter(e => e.transaction_type === 'allocation').reduce((sum, e) => sum + (e.amount || 0), 0))}</span>
+              </span>
+              <span className="text-blue-600">
+                Wallet Txns: <span className="font-semibold">{formatRupees(ledger.filter(e => ['credit', 'debit', 'transfer'].includes(e.transaction_type)).reduce((sum, e) => sum + (e.amount || 0), 0))}</span>
+              </span>
+              <span className="text-purple-600">
+                IoT Txns: <span className="font-semibold">{formatRupees(ledger.filter(e => e.is_iot_transaction || e.transaction_type === 'iot_offline').reduce((sum, e) => sum + (e.amount || 0), 0))}</span>
+              </span>
+            </div>
+            <button onClick={fetchData} className="text-gray-600 hover:text-gray-900 flex items-center">
+              <RefreshCw className="h-4 w-4 mr-1" /> Refresh
+            </button>
+          </div>
+        </div>
+
+        {/* Compliance Control Panel */}
+        <div className="mt-8">
+          <div 
+            className="flex items-center justify-between cursor-pointer bg-red-800 text-white rounded-t-xl px-6 py-4"
+            onClick={() => setShowCompliance(!showCompliance)}
+          >
+            <h2 className="text-xl font-bold flex items-center">
+              <Shield className="h-6 w-6 mr-2" />
+              Compliance Control Center
+            </h2>
+            <div className="flex items-center space-x-4">
+              {complianceDashboard && (
+                <div className="flex space-x-4 text-sm">
+                  <span className="bg-red-600 px-3 py-1 rounded-full flex items-center">
+                    <Bell className="h-4 w-4 mr-1" />
+                    {complianceDashboard.alerts?.unread || 0} Unread
+                  </span>
+                  <span className="bg-orange-500 px-3 py-1 rounded-full">
+                    {frozenEntities.length} Frozen
+                  </span>
+                  <span className="bg-yellow-500 text-black px-3 py-1 rounded-full">
+                    {watchlist.length} Watchlist
+                  </span>
+                </div>
+              )}
+              <span className="text-2xl">{showCompliance ? '▼' : '▶'}</span>
+            </div>
+          </div>
+
+          {showCompliance && (
+            <div className="bg-white rounded-b-xl shadow-lg">
+              {/* Alert Summary Bar */}
+              {complianceDashboard && (
+                <div className="grid grid-cols-4 gap-4 p-4 bg-gray-50 border-b">
+                  <div className="text-center p-3 bg-red-100 rounded-lg">
+                    <p className="text-2xl font-bold text-red-600">{complianceDashboard.alerts?.critical || 0}</p>
+                    <p className="text-xs text-red-800">Critical Alerts</p>
+                  </div>
+                  <div className="text-center p-3 bg-orange-100 rounded-lg">
+                    <p className="text-2xl font-bold text-orange-600">{complianceDashboard.alerts?.high || 0}</p>
+                    <p className="text-xs text-orange-800">High Priority</p>
+                  </div>
+                  <div className="text-center p-3 bg-yellow-100 rounded-lg">
+                    <p className="text-2xl font-bold text-yellow-600">{complianceDashboard.alerts?.medium || 0}</p>
+                    <p className="text-xs text-yellow-800">Medium</p>
+                  </div>
+                  <div className="text-center p-3 bg-blue-100 rounded-lg">
+                    <p className="text-2xl font-bold text-blue-600">{complianceDashboard.rules?.active || 0}</p>
+                    <p className="text-xs text-blue-800">Active Rules</p>
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 p-6">
+                {/* Recent Alerts */}
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <h3 className="font-bold text-gray-800 mb-3 flex items-center">
+                    <AlertTriangle className="h-5 w-5 mr-2 text-red-500" />
+                    Recent Alerts
+                  </h3>
+                  <div className="max-h-64 overflow-y-auto space-y-2">
+                    {alerts.length > 0 ? alerts.map(alert => (
+                      <div key={alert.id} className={`p-3 rounded-lg border-l-4 ${
+                        alert.severity === 'critical' ? 'bg-red-50 border-red-500' :
+                        alert.severity === 'high' ? 'bg-orange-50 border-orange-500' :
+                        alert.severity === 'medium' ? 'bg-yellow-50 border-yellow-500' :
+                        'bg-blue-50 border-blue-500'
+                      }`}>
+                        <div className="flex justify-between items-start">
+                          <div className="flex-1">
+                            <p className="text-sm font-medium text-gray-800">{alert.message}</p>
+                            <p className="text-xs text-gray-500 mt-1">
+                              {new Date(alert.created_at).toLocaleString('en-IN')}
+                              {alert.wallet_id && ` | Wallet: ${alert.wallet_id}`}
+                            </p>
+                          </div>
+                          {!alert.is_resolved && (
+                            <button
+                              onClick={() => handleResolveAlert(alert.id)}
+                              className="text-xs bg-green-500 text-white px-2 py-1 rounded hover:bg-green-600"
+                            >
+                              Resolve
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )) : (
+                      <p className="text-center text-gray-500 py-4">No active alerts</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Frozen Entities */}
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <h3 className="font-bold text-gray-800 mb-3 flex items-center">
+                    <Lock className="h-5 w-5 mr-2 text-red-500" />
+                    Frozen Wallets/Devices
+                  </h3>
+                  <div className="max-h-64 overflow-y-auto space-y-2">
+                    {frozenEntities.length > 0 ? frozenEntities.map(entity => (
+                      <div key={entity.id} className="p-3 bg-red-50 rounded-lg flex justify-between items-center">
+                        <div>
+                          <p className="font-mono text-sm text-gray-800">{entity.entity_id}</p>
+                          <p className="text-xs text-gray-500">
+                            {entity.entity_type} | {entity.reason}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => handleUnfreeze(entity.entity_type, entity.entity_id, entity.fi_id)}
+                          className="flex items-center text-xs bg-green-500 text-white px-3 py-1 rounded hover:bg-green-600"
+                        >
+                          <Unlock className="h-3 w-3 mr-1" />
+                          Unfreeze
+                        </button>
+                      </div>
+                    )) : (
+                      <p className="text-center text-gray-500 py-4">No frozen entities</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Freeze Entity Form */}
+                <div className="bg-red-50 rounded-lg p-4">
+                  <h3 className="font-bold text-red-800 mb-3 flex items-center">
+                    <Lock className="h-5 w-5 mr-2" />
+                    Freeze Wallet/Device
+                  </h3>
+                  <form onSubmit={handleFreezeEntity} className="space-y-3">
+                    <div className="grid grid-cols-2 gap-2">
+                      <select
+                        value={freezeForm.entityType}
+                        onChange={(e) => setFreezeForm({ ...freezeForm, entityType: e.target.value })}
+                        className="border rounded px-3 py-2 text-sm"
+                      >
+                        <option value="wallet">Wallet</option>
+                        <option value="iot_device">IoT Device</option>
+                      </select>
+                      <select
+                        value={freezeForm.fiId}
+                        onChange={(e) => setFreezeForm({ ...freezeForm, fiId: e.target.value })}
+                        className="border rounded px-3 py-2 text-sm"
+                      >
+                        <option value="">All Banks</option>
+                        {fis.map(fi => (
+                          <option key={fi.id} value={fi.id}>
+                            {fi.name === 'FI-Alpha' || fi.name === 'SBI' ? 'SBI' : 
+                             fi.name === 'FI-Beta' || fi.name === 'HDFC' ? 'HDFC' : fi.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <input
+                      type="text"
+                      placeholder="Entity ID (wallet-xxx or subwallet-xxx)"
+                      value={freezeForm.entityId}
+                      onChange={(e) => setFreezeForm({ ...freezeForm, entityId: e.target.value })}
+                      className="w-full border rounded px-3 py-2 text-sm"
+                      required
+                    />
+                    <input
+                      type="text"
+                      placeholder="Reason for freezing"
+                      value={freezeForm.reason}
+                      onChange={(e) => setFreezeForm({ ...freezeForm, reason: e.target.value })}
+                      className="w-full border rounded px-3 py-2 text-sm"
+                      required
+                    />
+                    <button
+                      type="submit"
+                      className="w-full bg-red-600 text-white py-2 rounded font-semibold hover:bg-red-700 flex items-center justify-center"
+                    >
+                      <Lock className="h-4 w-4 mr-2" />
+                      Freeze Entity
+                    </button>
+                  </form>
+                </div>
+
+                {/* Watchlist Form */}
+                <div className="bg-yellow-50 rounded-lg p-4">
+                  <h3 className="font-bold text-yellow-800 mb-3 flex items-center">
+                    <Eye className="h-5 w-5 mr-2" />
+                    Add to Watchlist
+                  </h3>
+                  <form onSubmit={handleAddToWatchlist} className="space-y-3">
+                    <div className="grid grid-cols-3 gap-2">
+                      <select
+                        value={watchlistForm.entityType}
+                        onChange={(e) => setWatchlistForm({ ...watchlistForm, entityType: e.target.value })}
+                        className="border rounded px-3 py-2 text-sm"
+                      >
+                        <option value="wallet">Wallet</option>
+                        <option value="iot_device">IoT Device</option>
+                      </select>
+                      <select
+                        value={watchlistForm.status}
+                        onChange={(e) => setWatchlistForm({ ...watchlistForm, status: e.target.value })}
+                        className="border rounded px-3 py-2 text-sm"
+                      >
+                        <option value="watching">Watching</option>
+                        <option value="blacklisted">Blacklist</option>
+                      </select>
+                      <select
+                        value={watchlistForm.riskLevel}
+                        onChange={(e) => setWatchlistForm({ ...watchlistForm, riskLevel: e.target.value })}
+                        className="border rounded px-3 py-2 text-sm"
+                      >
+                        <option value="low">Low Risk</option>
+                        <option value="medium">Medium Risk</option>
+                        <option value="high">High Risk</option>
+                      </select>
+                    </div>
+                    <input
+                      type="text"
+                      placeholder="Entity ID (wallet-xxx or subwallet-xxx)"
+                      value={watchlistForm.entityId}
+                      onChange={(e) => setWatchlistForm({ ...watchlistForm, entityId: e.target.value })}
+                      className="w-full border rounded px-3 py-2 text-sm"
+                      required
+                    />
+                    <input
+                      type="text"
+                      placeholder="Reason (suspicious activity, fraud, etc.)"
+                      value={watchlistForm.reason}
+                      onChange={(e) => setWatchlistForm({ ...watchlistForm, reason: e.target.value })}
+                      className="w-full border rounded px-3 py-2 text-sm"
+                      required
+                    />
+                    <button
+                      type="submit"
+                      className="w-full bg-yellow-600 text-white py-2 rounded font-semibold hover:bg-yellow-700 flex items-center justify-center"
+                    >
+                      <Eye className="h-4 w-4 mr-2" />
+                      Add to Watchlist
+                    </button>
+                  </form>
+                </div>
+
+                {/* Current Watchlist */}
+                <div className="lg:col-span-2 bg-gray-50 rounded-lg p-4">
+                  <h3 className="font-bold text-gray-800 mb-3 flex items-center">
+                    <Eye className="h-5 w-5 mr-2 text-yellow-500" />
+                    Current Watchlist
+                  </h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-gray-200">
+                        <tr>
+                          <th className="px-3 py-2 text-left">Type</th>
+                          <th className="px-3 py-2 text-left">Entity ID</th>
+                          <th className="px-3 py-2 text-left">Status</th>
+                          <th className="px-3 py-2 text-left">Risk</th>
+                          <th className="px-3 py-2 text-left">Reason</th>
+                          <th className="px-3 py-2 text-left">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y">
+                        {watchlist.length > 0 ? watchlist.map(entry => (
+                          <tr key={entry.id} className={entry.status === 'blacklisted' ? 'bg-red-50' : 'bg-yellow-50'}>
+                            <td className="px-3 py-2">{entry.entity_type}</td>
+                            <td className="px-3 py-2 font-mono">{entry.entity_id}</td>
+                            <td className="px-3 py-2">
+                              <span className={`px-2 py-1 rounded text-xs ${
+                                entry.status === 'blacklisted' ? 'bg-red-200 text-red-800' : 'bg-yellow-200 text-yellow-800'
+                              }`}>
+                                {entry.status}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2">
+                              <span className={`px-2 py-1 rounded text-xs ${
+                                entry.risk_level === 'high' ? 'bg-red-200 text-red-800' :
+                                entry.risk_level === 'medium' ? 'bg-orange-200 text-orange-800' :
+                                'bg-green-200 text-green-800'
+                              }`}>
+                                {entry.risk_level}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-gray-600">{entry.reason || '-'}</td>
+                            <td className="px-3 py-2">
+                              <button
+                                onClick={() => handleRemoveFromWatchlist(entry.entity_type, entry.entity_id, entry.fi_id)}
+                                className="text-red-600 hover:text-red-800 text-xs"
+                              >
+                                Remove
+                              </button>
+                            </td>
+                          </tr>
+                        )) : (
+                          <tr>
+                            <td colSpan="6" className="px-3 py-8 text-center text-gray-500">No entities in watchlist</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Compliance Rules */}
+                <div className="lg:col-span-2 bg-blue-50 rounded-lg p-4">
+                  <h3 className="font-bold text-blue-800 mb-3 flex items-center justify-between">
+                    <span className="flex items-center">
+                      <Shield className="h-5 w-5 mr-2" />
+                      Compliance Rules Management
+                    </span>
+                    {editingRule && (
+                      <button
+                        onClick={resetRuleForm}
+                        className="text-xs text-blue-600 hover:text-blue-800"
+                      >
+                        Cancel Edit
+                      </button>
+                    )}
+                  </h3>
+
+                  {/* Rule Form */}
+                  <form onSubmit={handleCreateOrUpdateRule} className="bg-white p-4 rounded-lg mb-4 border border-blue-200">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
+                      <input
+                        type="text"
+                        placeholder="Rule Name *"
+                        value={ruleForm.rule_name}
+                        onChange={(e) => setRuleForm({ ...ruleForm, rule_name: e.target.value })}
+                        className="border rounded px-3 py-2 text-sm col-span-2"
+                        required
+                      />
+                      <select
+                        value={ruleForm.rule_type}
+                        onChange={(e) => setRuleForm({ ...ruleForm, rule_type: e.target.value })}
+                        className="border rounded px-3 py-2 text-sm"
+                      >
+                        <option value="limit">Limit</option>
+                        <option value="hard_limit">Hard Limit</option>
+                        <option value="soft_limit">Soft Limit</option>
+                        <option value="monitoring">Monitoring</option>
+                      </select>
+                      <select
+                        value={ruleForm.target_type}
+                        onChange={(e) => setRuleForm({ ...ruleForm, target_type: e.target.value })}
+                        className="border rounded px-3 py-2 text-sm"
+                      >
+                        <option value="wallet">Wallet</option>
+                        <option value="iot_device">IoT Device</option>
+                        <option value="all">All</option>
+                      </select>
+                    </div>
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-3">
+                      <input
+                        type="number"
+                        placeholder="Single Limit (₹)"
+                        value={ruleForm.limit_value}
+                        onChange={(e) => setRuleForm({ ...ruleForm, limit_value: e.target.value })}
+                        className="border rounded px-3 py-2 text-sm"
+                      />
+                      <input
+                        type="number"
+                        placeholder="Daily Limit (₹)"
+                        value={ruleForm.daily_limit}
+                        onChange={(e) => setRuleForm({ ...ruleForm, daily_limit: e.target.value })}
+                        className="border rounded px-3 py-2 text-sm"
+                      />
+                      <input
+                        type="number"
+                        placeholder="Monthly Limit (₹)"
+                        value={ruleForm.monthly_limit}
+                        onChange={(e) => setRuleForm({ ...ruleForm, monthly_limit: e.target.value })}
+                        className="border rounded px-3 py-2 text-sm"
+                      />
+                      <input
+                        type="number"
+                        placeholder="Offline Limit (₹)"
+                        value={ruleForm.max_offline_amount}
+                        onChange={(e) => setRuleForm({ ...ruleForm, max_offline_amount: e.target.value })}
+                        className="border rounded px-3 py-2 text-sm"
+                      />
+                      <input
+                        type="number"
+                        placeholder="Offline Count"
+                        value={ruleForm.max_offline_count}
+                        onChange={(e) => setRuleForm({ ...ruleForm, max_offline_count: e.target.value })}
+                        className="border rounded px-3 py-2 text-sm"
+                      />
+                    </div>
+                    <div className="flex gap-3">
+                      <input
+                        type="text"
+                        placeholder="Description (optional)"
+                        value={ruleForm.description}
+                        onChange={(e) => setRuleForm({ ...ruleForm, description: e.target.value })}
+                        className="flex-1 border rounded px-3 py-2 text-sm"
+                      />
+                      <label className="flex items-center space-x-2 px-3">
+                        <input
+                          type="checkbox"
+                          checked={ruleForm.is_active}
+                          onChange={(e) => setRuleForm({ ...ruleForm, is_active: e.target.checked })}
+                          className="rounded"
+                        />
+                        <span className="text-sm">Active</span>
+                      </label>
+                      <button
+                        type="submit"
+                        className={`px-6 py-2 rounded font-semibold text-white ${
+                          editingRule ? 'bg-orange-600 hover:bg-orange-700' : 'bg-blue-600 hover:bg-blue-700'
+                        }`}
+                      >
+                        {editingRule ? 'Update Rule' : 'Add Rule'}
+                      </button>
+                    </div>
+                  </form>
+
+                  {/* Rules Table */}
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-blue-100">
+                        <tr>
+                          <th className="px-3 py-2 text-left">Rule Name</th>
+                          <th className="px-3 py-2 text-left">Type</th>
+                          <th className="px-3 py-2 text-left">Target</th>
+                          <th className="px-3 py-2 text-left">Limit</th>
+                          <th className="px-3 py-2 text-left">Daily</th>
+                          <th className="px-3 py-2 text-left">Monthly</th>
+                          <th className="px-3 py-2 text-left">Status</th>
+                          <th className="px-3 py-2 text-left">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y">
+                        {rules.length > 0 ? rules.map(rule => (
+                          <tr key={rule.id} className={rule.is_active ? 'bg-white' : 'bg-gray-100'}>
+                            <td className="px-3 py-2 font-medium">{rule.rule_name}</td>
+                            <td className="px-3 py-2">{rule.rule_type}</td>
+                            <td className="px-3 py-2">{rule.target_type}</td>
+                            <td className="px-3 py-2">{rule.limit_value ? formatRupees(rule.limit_value) : '-'}</td>
+                            <td className="px-3 py-2">{rule.daily_limit ? formatRupees(rule.daily_limit) : '-'}</td>
+                            <td className="px-3 py-2">{rule.monthly_limit ? formatRupees(rule.monthly_limit) : '-'}</td>
+                            <td className="px-3 py-2">
+                              <span className={`px-2 py-1 rounded text-xs ${
+                                rule.is_active ? 'bg-green-200 text-green-800' : 'bg-gray-200 text-gray-600'
+                              }`}>
+                                {rule.is_active ? 'Active' : 'Inactive'}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 space-x-2">
+                              <button
+                                onClick={() => handleEditRule(rule)}
+                                className="text-blue-600 hover:text-blue-800 text-xs font-medium"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() => handleDeleteRule(rule.id)}
+                                className="text-red-600 hover:text-red-800 text-xs font-medium"
+                              >
+                                Delete
+                              </button>
+                            </td>
+                          </tr>
+                        )) : (
+                          <tr>
+                            <td colSpan="8" className="px-3 py-8 text-center text-gray-500">No compliance rules defined</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </main>
     </div>
@@ -329,10 +1110,44 @@ function FIDashboard({ fiApi, fiName, fiColor, onSelectWallet }) {
     }
   };
 
-  const bgGradient = fiColor === 'green' 
+  const bgGradient = fiColor === 'blue' 
+    ? 'from-blue-800 to-blue-700' 
+    : fiColor === 'red'
+    ? 'from-red-800 to-red-700'
+    : fiColor === 'green' 
     ? 'from-green-800 to-green-700' 
     : 'from-purple-800 to-purple-700';
-  const headerBg = fiColor === 'green' ? 'bg-green-900' : 'bg-purple-900';
+  const headerBg = fiColor === 'blue' ? 'bg-blue-900' : fiColor === 'red' ? 'bg-red-900' : fiColor === 'green' ? 'bg-green-900' : 'bg-purple-900';
+
+  // Bank logos
+  const getBankLogo = () => {
+    if (fiName === 'SBI') {
+      return (
+        <img 
+          src="https://upload.wikimedia.org/wikipedia/en/thumb/5/58/State_Bank_of_India_logo.svg/200px-State_Bank_of_India_logo.svg.png" 
+          alt="SBI Logo"
+          className="w-6 h-6 object-contain"
+          onError={(e) => { e.target.style.display = 'none'; }}
+        />
+      );
+    } else if (fiName === 'HDFC') {
+      return (
+        <img 
+          src="https://upload.wikimedia.org/wikipedia/commons/thumb/2/28/HDFC_Bank_Logo.svg/200px-HDFC_Bank_Logo.svg.png" 
+          alt="HDFC Logo"
+          className="w-6 h-6 object-contain"
+          onError={(e) => { e.target.style.display = 'none'; }}
+        />
+      );
+    }
+    return <Building2 className="h-8 w-8" />;
+  };
+
+  const getBankFullName = () => {
+    if (fiName === 'SBI') return 'State Bank of India';
+    if (fiName === 'HDFC') return 'HDFC Bank';
+    return fiName;
+  };
 
   return (
     <div className={`min-h-screen bg-gradient-to-br ${bgGradient}`}>
@@ -341,12 +1156,12 @@ function FIDashboard({ fiApi, fiName, fiColor, onSelectWallet }) {
         <div className="max-w-7xl mx-auto px-4 py-6">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-4">
-              <div className="bg-white/20 p-3 rounded-full">
-                <Building2 className="h-8 w-8" />
+              <div className="bg-white p-2 rounded-full">
+                {getBankLogo()}
               </div>
               <div>
-                <h1 className="text-2xl font-bold">{fiName}</h1>
-                <p className="opacity-75">Financial Institution Dashboard</p>
+                <h1 className="text-2xl font-bold">{getBankFullName()}</h1>
+                <p className="opacity-75">{fiName} Dashboard</p>
               </div>
             </div>
             <div className="flex items-center space-x-3">
@@ -557,7 +1372,7 @@ function WalletDashboard({ wallet, fiApi, fiName, onBack }) {
   const [transactions, setTransactions] = useState([]);
   const [allWallets, setAllWallets] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [transferForm, setTransferForm] = useState({ toWallet: '', amount: '', description: '', isCrossFI: false });
+  const [transferForm, setTransferForm] = useState({ toWallet: '', amount: '', description: '', recipientType: 'wallet', recipientFI: '' });
   
   // New state for enhanced features
   const [isOffline, setIsOffline] = useState(false);
@@ -569,6 +1384,9 @@ function WalletDashboard({ wallet, fiApi, fiName, onBack }) {
   const [activeTab, setActiveTab] = useState('transfer'); // transfer, offline, devices, zkp, subwallets, compliance
   const [otherFIWallets, setOtherFIWallets] = useState([]);
   
+  // NEW: Universal Recipients (all wallets + sub-wallets across all FIs)
+  const [allRecipients, setAllRecipients] = useState([]);
+  
   // NEW: Enhanced Paper Features State
   const [subWallets, setSubWallets] = useState([]);
   const [compliance, setCompliance] = useState(null);
@@ -576,6 +1394,11 @@ function WalletDashboard({ wallet, fiApi, fiName, onBack }) {
   const [subWalletForm, setSubWalletForm] = useState({ deviceId: '', balance: '', spendingLimit: 5000 });
   const [allocateSubForm, setAllocateSubForm] = useState({ subWalletId: '', amount: '' });
   const [subWalletPayForm, setSubWalletPayForm] = useState({ subWalletId: '', toWallet: '', amount: '' });
+  
+  // NEW: Expanded device view state
+  const [expandedDeviceId, setExpandedDeviceId] = useState(null);
+  const [deviceTransactions, setDeviceTransactions] = useState([]);
+  const [loadingDeviceTx, setLoadingDeviceTx] = useState(false);
 
   const fetchData = async () => {
     setLoading(true);
@@ -619,15 +1442,85 @@ function WalletDashboard({ wallet, fiApi, fiName, onBack }) {
         console.log('Enhanced paper features not available:', err.message);
       }
       
-      // Fetch other FI's wallets for cross-FI transfers
+      // NEW: Fetch ALL recipients from ALL FIs (wallets + sub-wallets)
+      const recipients = [];
+      
+      // Add this FI's wallets (excluding current wallet)
+      wallets.filter(w => w.id !== wallet.id).forEach(w => {
+        recipients.push({
+          id: w.id,
+          name: w.name,
+          type: 'wallet',
+          fi: fiName,
+          balance: w.balance,
+          label: `👛 ${w.name} (${fiName})`
+        });
+      });
+      
+      // Add this FI's sub-wallets from all wallets except current
+      try {
+        for (const w of wallets.filter(ww => ww.id !== wallet.id)) {
+          const swRes = await fiApi.getSubWallets(w.id);
+          (swRes.subWallets || []).filter(sw => sw.status === 'active').forEach(sw => {
+            recipients.push({
+              id: sw.id,
+              name: `${w.name}'s ${sw.device_type}`,
+              type: 'subwallet',
+              fi: fiName,
+              parentWallet: w.id,
+              balance: sw.balance,
+              label: `📱 ${w.name}'s ${sw.device_type} (${fiName})`
+            });
+          });
+        }
+      } catch (err) {
+        console.log('Could not fetch this FI sub-wallets:', err.message);
+      }
+      
+      // Fetch other FI's wallets and sub-wallets
       try {
         const otherFIName = getOtherFIName(fiName);
         const otherApi = getFIApi(otherFIName);
         const otherWalletsRes = await otherApi.getWallets();
-        setOtherFIWallets((otherWalletsRes.wallets || []).map(w => ({ ...w, fi: otherFIName })));
+        const otherWallets = otherWalletsRes.wallets || [];
+        setOtherFIWallets(otherWallets.map(w => ({ ...w, fi: otherFIName })));
+        
+        // Add other FI's wallets
+        otherWallets.forEach(w => {
+          recipients.push({
+            id: w.id,
+            name: w.name,
+            type: 'wallet',
+            fi: otherFIName,
+            balance: w.balance,
+            label: `👛 ${w.name} (${otherFIName})`
+          });
+        });
+        
+        // Add other FI's sub-wallets
+        for (const w of otherWallets) {
+          try {
+            const swRes = await otherApi.getSubWallets(w.id);
+            (swRes.subWallets || []).filter(sw => sw.status === 'active').forEach(sw => {
+              recipients.push({
+                id: sw.id,
+                name: `${w.name}'s ${sw.device_type}`,
+                type: 'subwallet',
+                fi: otherFIName,
+                parentWallet: w.id,
+                balance: sw.balance,
+                label: `📱 ${w.name}'s ${sw.device_type} (${otherFIName})`
+              });
+            });
+          } catch (err) {
+            // Skip if sub-wallets not available for this wallet
+          }
+        }
       } catch (err) {
         console.log('Could not fetch other FI wallets:', err.message);
       }
+      
+      setAllRecipients(recipients);
     } catch (error) {
       console.error('Error fetching data:', error);
     } finally {
@@ -644,33 +1537,75 @@ function WalletDashboard({ wallet, fiApi, fiName, onBack }) {
   const handleTransfer = async (e) => {
     e.preventDefault();
     try {
+      // Find the recipient from allRecipients to determine type and FI
+      const recipient = allRecipients.find(r => r.id === transferForm.toWallet);
+      if (!recipient) {
+        alert('Please select a valid recipient');
+        return;
+      }
+      
+      const isCrossFI = recipient.fi !== fiName;
+      const isToSubWallet = recipient.type === 'subwallet';
+      const amount = parseFloat(transferForm.amount);
+      
       if (isOffline) {
         // Create offline transaction with ZKP
-        const targetFI = transferForm.isCrossFI ? getOtherFIName(fiName) : fiName;
         await fiApi.createOfflineTransaction(
           wallet.id, 
           transferForm.toWallet, 
-          targetFI,
-          parseFloat(transferForm.amount)
+          recipient.fi,
+          amount,
+          isToSubWallet ? 'subwallet' : 'wallet'
         );
         alert('Offline transaction queued with ZKP proof! Will be processed when online.');
-      } else if (transferForm.isCrossFI) {
+      } else if (isCrossFI) {
         // Cross-FI transfer via Central Bank
-        const targetFI = getOtherFIName(fiName);
-        await centralBankApi.routeCrossFI(
-          fiName,
-          targetFI,
-          wallet.id,
-          transferForm.toWallet,
-          parseFloat(transferForm.amount)
-        );
-        alert(`Cross-FI transfer to ${targetFI} initiated!`);
+        if (isToSubWallet) {
+          // For sub-wallet: toWallet = parentWallet, toSubWallet = the sub-wallet ID
+          await centralBankApi.routeCrossFI(
+            fiName,
+            recipient.fi,
+            wallet.id,
+            recipient.parentWallet,  // Parent wallet ID
+            transferForm.toWallet,   // Sub-wallet ID
+            amount,
+            transferForm.description,
+            'subwallet'
+          );
+          alert(`Cross-FI transfer to ${recipient.name} (IoT) @ ${recipient.fi} initiated!`);
+        } else {
+          // Normal wallet-to-wallet cross-FI
+          await centralBankApi.routeCrossFI(
+            fiName,
+            recipient.fi,
+            wallet.id,
+            transferForm.toWallet,
+            null,  // No sub-wallet
+            amount,
+            transferForm.description,
+            'wallet'
+          );
+          alert(`Cross-FI transfer to ${recipient.name} @ ${recipient.fi} initiated!`);
+        }
       } else {
-        // Normal same-FI transfer
-        await fiApi.createTransaction(wallet.id, transferForm.toWallet, parseFloat(transferForm.amount), transferForm.description);
-        alert('Transfer successful!');
+        // Same-FI transfer
+        if (isToSubWallet) {
+          // Pay to sub-wallet in same FI
+          await fiApi.payToSubWallet(
+            wallet.id,
+            recipient.parentWallet,
+            transferForm.toWallet,
+            amount,
+            transferForm.description
+          );
+          alert(`Payment to ${recipient.name} successful!`);
+        } else {
+          // Normal wallet-to-wallet transfer
+          await fiApi.createTransaction(wallet.id, transferForm.toWallet, amount, transferForm.description);
+          alert('Transfer successful!');
+        }
       }
-      setTransferForm({ toWallet: '', amount: '', description: '', isCrossFI: false });
+      setTransferForm({ toWallet: '', amount: '', description: '', recipientType: 'wallet', recipientFI: '' });
       fetchData();
     } catch (err) {
       alert('Error: ' + err.message);
@@ -732,6 +1667,32 @@ function WalletDashboard({ wallet, fiApi, fiName, onBack }) {
       alert('IoT payment successful!');
     } catch (err) {
       alert('Error: ' + err.message);
+    }
+  };
+
+  // Toggle device expansion and fetch transactions
+  const handleToggleDeviceExpand = async (deviceId) => {
+    if (expandedDeviceId === deviceId) {
+      setExpandedDeviceId(null);
+      setDeviceTransactions([]);
+      return;
+    }
+    
+    setExpandedDeviceId(deviceId);
+    setDeviceTransactions([]);
+    
+    // Find the sub-wallet for this device
+    const subWallet = subWallets.find(sw => sw.device_id === deviceId);
+    if (subWallet) {
+      setLoadingDeviceTx(true);
+      try {
+        const result = await fiApi.getSubWalletTransactions(subWallet.id);
+        setDeviceTransactions(result.transactions || []);
+      } catch (err) {
+        console.log('Error fetching device transactions:', err.message);
+      } finally {
+        setLoadingDeviceTx(false);
+      }
     }
   };
 
@@ -933,7 +1894,6 @@ function WalletDashboard({ wallet, fiApi, fiName, onBack }) {
               { id: 'transfer', label: 'Transfer', icon: <Send className="h-4 w-4" /> },
               { id: 'offline', label: 'Offline Queue', icon: <WifiOff className="h-4 w-4" />, badge: pendingOffline.length },
               { id: 'devices', label: 'IoT Devices', icon: <Watch className="h-4 w-4" />, badge: devices.length },
-              { id: 'subwallets', label: 'Sub-Wallets', icon: <Smartphone className="h-4 w-4" />, badge: subWallets.length },
               { id: 'compliance', label: 'Compliance', icon: <Shield className="h-4 w-4" /> },
               { id: 'zkp', label: 'ZKP Auth', icon: <Shield className="h-4 w-4" /> },
             ].map((tab) => (
@@ -963,17 +1923,11 @@ function WalletDashboard({ wallet, fiApi, fiName, onBack }) {
                 Transfer Money {isOffline && <span className="text-sm text-red-500 ml-2">(Offline Mode - ZKP Protected)</span>}
               </h2>
               
-              {/* Cross-FI Toggle */}
-              <div className="mb-4 flex items-center space-x-4">
-                <label className="flex items-center space-x-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={transferForm.isCrossFI}
-                    onChange={(e) => setTransferForm({ ...transferForm, isCrossFI: e.target.checked, toWallet: '' })}
-                    className="w-4 h-4 text-blue-600 rounded"
-                  />
-                  <span className="text-gray-700">Cross-FI Transfer (to {getOtherFIName(fiName)})</span>
-                </label>
+              {/* Universal Payment Info */}
+              <div className="mb-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
+                <p className="text-sm text-blue-700">
+                  💡 Pay to any wallet or IoT device across all Financial Institutions. Cross-FI payments are automatically routed via Central Bank.
+                </p>
               </div>
 
               <form onSubmit={handleTransfer} className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -983,16 +1937,27 @@ function WalletDashboard({ wallet, fiApi, fiName, onBack }) {
                   className="border-2 border-gray-200 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none"
                   required
                 >
-                  <option value="">Select Recipient</option>
-                  {transferForm.isCrossFI ? (
-                    otherFIWallets.map((w) => (
-                      <option key={w.id} value={w.id}>{w.name} ({w.fi})</option>
-                    ))
-                  ) : (
-                    allWallets.map((w) => (
-                      <option key={w.id} value={w.id}>{w.name}</option>
-                    ))
-                  )}
+                  <option value="">Select Recipient (Wallet / IoT)</option>
+                  <optgroup label={`📍 ${fiName} - Wallets`}>
+                    {allRecipients.filter(r => r.fi === fiName && r.type === 'wallet').map((r) => (
+                      <option key={r.id} value={r.id}>👛 {r.name}</option>
+                    ))}
+                  </optgroup>
+                  <optgroup label={`📍 ${fiName} - IoT Devices`}>
+                    {allRecipients.filter(r => r.fi === fiName && r.type === 'subwallet').map((r) => (
+                      <option key={r.id} value={r.id}>📱 {r.name}</option>
+                    ))}
+                  </optgroup>
+                  <optgroup label={`🌐 ${getOtherFIName(fiName)} - Wallets`}>
+                    {allRecipients.filter(r => r.fi !== fiName && r.type === 'wallet').map((r) => (
+                      <option key={r.id} value={r.id}>👛 {r.name}</option>
+                    ))}
+                  </optgroup>
+                  <optgroup label={`🌐 ${getOtherFIName(fiName)} - IoT Devices`}>
+                    {allRecipients.filter(r => r.fi !== fiName && r.type === 'subwallet').map((r) => (
+                      <option key={r.id} value={r.id}>📱 {r.name}</option>
+                    ))}
+                  </optgroup>
                 </select>
                 <div className="relative">
                   <span className="absolute left-3 top-3 text-gray-500 font-bold">₹</span>
@@ -1019,14 +1984,14 @@ function WalletDashboard({ wallet, fiApi, fiName, onBack }) {
                   className={`rounded-lg px-6 py-3 font-semibold transition flex items-center justify-center ${
                     isOffline 
                       ? 'bg-orange-600 text-white hover:bg-orange-700' 
-                      : transferForm.isCrossFI
+                      : (allRecipients.find(r => r.id === transferForm.toWallet)?.fi !== fiName)
                         ? 'bg-purple-600 text-white hover:bg-purple-700'
                         : 'bg-blue-600 text-white hover:bg-blue-700'
                   }`}
                   disabled={walletData.balance <= 0}
                 >
                   {isOffline ? <WifiOff className="h-5 w-5 mr-2" /> : <Send className="h-5 w-5 mr-2" />}
-                  {isOffline ? 'Queue Offline' : transferForm.isCrossFI ? 'Cross-FI Send' : 'Send'}
+                  {isOffline ? 'Queue Offline' : (allRecipients.find(r => r.id === transferForm.toWallet)?.fi !== fiName) ? 'Cross-FI Send' : 'Send'}
                 </button>
               </form>
               {walletData.balance <= 0 && (
@@ -1100,13 +2065,24 @@ function WalletDashboard({ wallet, fiApi, fiName, onBack }) {
             </div>
           )}
 
-          {/* IoT Devices Tab */}
+          {/* IoT Devices Tab - Consolidated with Sub-Wallets */}
           {activeTab === 'devices' && (
             <div className="p-6">
               <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center">
                 <Watch className="h-6 w-6 mr-2 text-blue-600" />
                 IoT Device Management
               </h2>
+              
+              {/* Info Banner */}
+              <div className="bg-blue-50 border-2 border-blue-200 rounded-lg p-4 mb-6">
+                <p className="text-blue-800 text-sm">
+                  Register IoT devices (smartwatches, rings, etc.) and allocate funds for contactless payments.
+                  Each device can have a sub-wallet with spending limits (max ₹25,000) as per AML/CFT compliance.
+                </p>
+                <div className="mt-2 text-xs text-blue-600">
+                  Main Wallet: {formatRupees(walletData.balance)} | In IoT Devices: {formatRupees(subWallets.reduce((sum, sw) => sum + sw.balance, 0))} | Total: {formatRupees(walletData.balance + subWallets.reduce((sum, sw) => sum + sw.balance, 0))}
+                </div>
+              </div>
               
               {/* Register Device Form */}
               <form onSubmit={handleRegisterDevice} className="bg-gray-50 rounded-lg p-4 mb-6">
@@ -1140,8 +2116,8 @@ function WalletDashboard({ wallet, fiApi, fiName, onBack }) {
                 </div>
               </form>
 
-              {/* Registered Devices */}
-              <h3 className="font-semibold text-gray-700 mb-3">Registered Devices</h3>
+              {/* Registered Devices List */}
+              <h3 className="font-semibold text-gray-700 mb-3">Your IoT Devices ({devices.length})</h3>
               {devices.length === 0 ? (
                 <div className="text-center py-8 text-gray-500 border-2 border-dashed border-gray-200 rounded-lg">
                   <Watch className="h-12 w-12 mx-auto mb-4 text-gray-300" />
@@ -1149,87 +2125,287 @@ function WalletDashboard({ wallet, fiApi, fiName, onBack }) {
                   <p className="text-sm">Register a smartwatch, ring, or other IoT device for contactless payments</p>
                 </div>
               ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-                  {devices.map((device) => (
-                    <div key={device.id} className="border-2 border-gray-200 rounded-lg p-4 hover:border-blue-300 transition">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center space-x-3">
-                          <div className={`p-2 rounded-full ${device.status === 'active' ? 'bg-blue-100 text-blue-600' : 'bg-gray-100 text-gray-400'}`}>
-                            {getDeviceIcon(device.device_type)}
+                <div className="space-y-4">
+                  {devices.map((device) => {
+                    const deviceSubWallet = subWallets.find(sw => sw.device_id === device.id);
+                    const isExpanded = expandedDeviceId === device.id;
+                    
+                    return (
+                      <div key={device.id} className={`border-2 rounded-lg transition-all ${
+                        isExpanded 
+                          ? 'border-blue-400 shadow-lg' 
+                          : device.status === 'active' ? 'border-gray-200 hover:border-blue-300' : 'border-gray-200 bg-gray-50'
+                      }`}>
+                        {/* Device Header - Clickable */}
+                        <div 
+                          className="p-4 cursor-pointer flex items-center justify-between"
+                          onClick={() => handleToggleDeviceExpand(device.id)}
+                        >
+                          <div className="flex items-center space-x-3">
+                            <div className={`p-2 rounded-full ${device.status === 'active' ? 'bg-blue-100 text-blue-600' : 'bg-gray-100 text-gray-400'}`}>
+                              {getDeviceIcon(device.device_type)}
+                            </div>
+                            <div>
+                              <p className="font-medium">{device.device_name || device.device_type}</p>
+                              <p className="text-xs text-gray-500 capitalize">{device.device_type.replace('_', ' ')}</p>
+                            </div>
                           </div>
-                          <div>
-                            <p className="font-medium">{device.device_name}</p>
-                            <p className="text-xs text-gray-500 capitalize">{device.device_type.replace('_', ' ')}</p>
+                          <div className="flex items-center space-x-3">
+                            {deviceSubWallet && (
+                              <div className="text-right mr-4">
+                                <p className="text-xs text-gray-500">Balance</p>
+                                <p className="font-bold text-purple-600">{formatRupees(deviceSubWallet.balance)}</p>
+                              </div>
+                            )}
+                            <span className={`px-2 py-1 rounded text-xs ${device.status === 'active' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                              {device.status}
+                            </span>
+                            <ChevronDown className={`h-5 w-5 text-gray-400 transition-transform ${isExpanded ? 'transform rotate-180' : ''}`} />
                           </div>
                         </div>
-                        <div className="flex items-center space-x-2">
-                          <span className={`px-2 py-1 rounded text-xs ${device.status === 'active' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
-                            {device.status}
-                          </span>
-                          <button
-                            onClick={() => handleRevokeDevice(device.id)}
-                            className="text-red-500 hover:text-red-700 p-1"
-                            title="Revoke device"
-                          >
-                            <XCircle className="h-5 w-5" />
-                          </button>
-                        </div>
+                        
+                        {/* Expanded Content */}
+                        {isExpanded && device.status === 'active' && (
+                          <div className="border-t border-gray-200 p-4 bg-gray-50">
+                            {/* Sub-wallet info or create form */}
+                            {deviceSubWallet ? (
+                              <div className="space-y-4">
+                                {/* Sub-wallet Balance Card */}
+                                <div className="bg-white rounded-lg p-4 border border-purple-200">
+                                  <div className="flex items-center justify-between mb-3">
+                                    <h4 className="font-semibold text-gray-700">Device Wallet</h4>
+                                    <span className={`px-2 py-1 rounded text-xs ${
+                                      deviceSubWallet.status === 'active' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                                    }`}>
+                                      {deviceSubWallet.status}
+                                    </span>
+                                  </div>
+                                  <div className="grid grid-cols-3 gap-4 mb-4">
+                                    <div>
+                                      <p className="text-xs text-gray-500">Balance</p>
+                                      <p className="text-xl font-bold text-purple-600">{formatRupees(deviceSubWallet.balance)}</p>
+                                    </div>
+                                    <div>
+                                      <p className="text-xs text-gray-500">Spending Limit</p>
+                                      <p className="text-lg font-semibold text-gray-700">{formatRupees(deviceSubWallet.spending_limit)}</p>
+                                    </div>
+                                    <div>
+                                      <p className="text-xs text-gray-500">Daily Spent</p>
+                                      <p className="text-lg font-semibold text-gray-700">{formatRupees(deviceSubWallet.daily_spent || 0)}</p>
+                                    </div>
+                                  </div>
+                                  
+                                  {deviceSubWallet.status === 'active' && (
+                                    <div className="flex space-x-2">
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleReturnFromSubWallet(deviceSubWallet.id);
+                                        }}
+                                        className="flex-1 bg-gray-200 text-gray-700 rounded px-3 py-2 text-sm hover:bg-gray-300 transition"
+                                        disabled={deviceSubWallet.balance <= 0}
+                                      >
+                                        Return Funds
+                                      </button>
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleRevokeSubWallet(deviceSubWallet.id);
+                                        }}
+                                        className="flex-1 bg-red-100 text-red-700 rounded px-3 py-2 text-sm hover:bg-red-200 transition"
+                                      >
+                                        Revoke Wallet
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                                
+                                {/* Allocate More Funds */}
+                                {deviceSubWallet.status === 'active' && (
+                                  <div className="bg-blue-50 rounded-lg p-4">
+                                    <h4 className="font-semibold text-gray-700 mb-2">Add Funds</h4>
+                                    <form onSubmit={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      setAllocateSubForm({ ...allocateSubForm, subWalletId: deviceSubWallet.id });
+                                      handleAllocateToSubWallet(e);
+                                    }} className="flex space-x-2">
+                                      <div className="relative flex-1">
+                                        <span className="absolute left-3 top-2 text-gray-500 font-bold">₹</span>
+                                        <input
+                                          type="number"
+                                          placeholder="Amount"
+                                          value={allocateSubForm.subWalletId === deviceSubWallet.id ? allocateSubForm.amount : ''}
+                                          onChange={(e) => setAllocateSubForm({ subWalletId: deviceSubWallet.id, amount: e.target.value })}
+                                          onClick={(e) => e.stopPropagation()}
+                                          className="border border-gray-300 rounded pl-8 pr-3 py-2 w-full text-sm"
+                                          min="1"
+                                          max={walletData.balance}
+                                        />
+                                      </div>
+                                      <button
+                                        type="submit"
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="bg-blue-600 text-white rounded px-4 py-2 text-sm hover:bg-blue-700"
+                                      >
+                                        Allocate
+                                      </button>
+                                    </form>
+                                  </div>
+                                )}
+                                
+                                {/* Make Payment */}
+                                {deviceSubWallet.status === 'active' && deviceSubWallet.balance > 0 && (
+                                  <div className="bg-green-50 rounded-lg p-4">
+                                    <h4 className="font-semibold text-gray-700 mb-2">Make Payment</h4>
+                                    <form onSubmit={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      setSubWalletPayForm({ ...subWalletPayForm, subWalletId: deviceSubWallet.id });
+                                      handleSubWalletPayment(e);
+                                    }} className="flex space-x-2">
+                                      <select
+                                        value={subWalletPayForm.subWalletId === deviceSubWallet.id ? subWalletPayForm.toWallet : ''}
+                                        onChange={(e) => setSubWalletPayForm({ subWalletId: deviceSubWallet.id, toWallet: e.target.value, amount: subWalletPayForm.subWalletId === deviceSubWallet.id ? subWalletPayForm.amount : '' })}
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="border border-gray-300 rounded px-3 py-2 text-sm flex-1"
+                                        required
+                                      >
+                                        <option value="">Select Recipient</option>
+                                        {allWallets.map((w) => (
+                                          <option key={w.id} value={w.id}>{w.name}</option>
+                                        ))}
+                                      </select>
+                                      <div className="relative">
+                                        <span className="absolute left-3 top-2 text-gray-500 font-bold">₹</span>
+                                        <input
+                                          type="number"
+                                          placeholder="Amount"
+                                          value={subWalletPayForm.subWalletId === deviceSubWallet.id ? subWalletPayForm.amount : ''}
+                                          onChange={(e) => setSubWalletPayForm({ subWalletId: deviceSubWallet.id, toWallet: subWalletPayForm.subWalletId === deviceSubWallet.id ? subWalletPayForm.toWallet : '', amount: e.target.value })}
+                                          onClick={(e) => e.stopPropagation()}
+                                          className="border border-gray-300 rounded pl-8 pr-3 py-2 w-24 text-sm"
+                                          min="1"
+                                          max={deviceSubWallet.balance}
+                                        />
+                                      </div>
+                                      <button
+                                        type="submit"
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="bg-green-600 text-white rounded px-4 py-2 text-sm hover:bg-green-700"
+                                      >
+                                        Pay
+                                      </button>
+                                    </form>
+                                  </div>
+                                )}
+                                
+                                {/* Transaction History */}
+                                <div className="bg-white rounded-lg p-4 border border-gray-200">
+                                  <h4 className="font-semibold text-gray-700 mb-3 flex items-center">
+                                    <History className="h-4 w-4 mr-2" />
+                                    Transaction History
+                                  </h4>
+                                  {loadingDeviceTx ? (
+                                    <p className="text-sm text-gray-500">Loading transactions...</p>
+                                  ) : deviceTransactions.length === 0 ? (
+                                    <p className="text-sm text-gray-500">No transactions yet</p>
+                                  ) : (
+                                    <div className="space-y-2 max-h-48 overflow-y-auto">
+                                      {deviceTransactions.map((tx, idx) => (
+                                        <div key={tx.id || idx} className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
+                                          <div className="flex items-center space-x-2">
+                                            <div className={`p-1 rounded-full ${tx.type === 'credit' || tx.type === 'allocation' ? 'bg-green-100' : 'bg-red-100'}`}>
+                                              {tx.type === 'credit' || tx.type === 'allocation' ? (
+                                                <ArrowDownLeft className="h-3 w-3 text-green-600" />
+                                              ) : (
+                                                <ArrowUpRight className="h-3 w-3 text-red-600" />
+                                              )}
+                                            </div>
+                                            <div>
+                                              <p className="text-xs font-medium">{tx.description || tx.type}</p>
+                                              <p className="text-xs text-gray-400">{new Date(tx.created_at || tx.timestamp).toLocaleString()}</p>
+                                            </div>
+                                          </div>
+                                          <p className={`font-medium text-sm ${tx.type === 'credit' || tx.type === 'allocation' ? 'text-green-600' : 'text-red-600'}`}>
+                                            {tx.type === 'credit' || tx.type === 'allocation' ? '+' : '-'}{formatRupees(tx.amount)}
+                                          </p>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            ) : (
+                              /* Create Sub-wallet Form */
+                              <div className="bg-purple-50 rounded-lg p-4">
+                                <h4 className="font-semibold text-gray-700 mb-3">Setup Device Wallet</h4>
+                                <p className="text-sm text-gray-600 mb-3">
+                                  Create a sub-wallet to allocate funds for this device. Balance will be deducted from your main wallet.
+                                </p>
+                                <form onSubmit={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setSubWalletForm({ ...subWalletForm, deviceId: device.id });
+                                  handleCreateSubWallet(e);
+                                }} className="grid grid-cols-3 gap-3">
+                                  <div className="relative">
+                                    <span className="absolute left-3 top-2 text-gray-500 font-bold">₹</span>
+                                    <input
+                                      type="number"
+                                      placeholder="Initial Balance"
+                                      value={subWalletForm.deviceId === device.id ? subWalletForm.balance : ''}
+                                      onChange={(e) => setSubWalletForm({ deviceId: device.id, balance: e.target.value, spendingLimit: subWalletForm.deviceId === device.id ? subWalletForm.spendingLimit : 5000 })}
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="border border-gray-300 rounded pl-8 pr-3 py-2 w-full text-sm"
+                                      max={Math.min(walletData.balance, 25000)}
+                                      min="100"
+                                      required
+                                    />
+                                  </div>
+                                  <div className="relative">
+                                    <span className="absolute left-3 top-2 text-gray-500 font-bold">₹</span>
+                                    <input
+                                      type="number"
+                                      placeholder="Spending Limit"
+                                      value={subWalletForm.deviceId === device.id ? subWalletForm.spendingLimit : 5000}
+                                      onChange={(e) => setSubWalletForm({ deviceId: device.id, balance: subWalletForm.deviceId === device.id ? subWalletForm.balance : '', spendingLimit: e.target.value })}
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="border border-gray-300 rounded pl-8 pr-3 py-2 w-full text-sm"
+                                      max="25000"
+                                      min="100"
+                                    />
+                                  </div>
+                                  <button
+                                    type="submit"
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="bg-purple-600 text-white rounded px-4 py-2 text-sm hover:bg-purple-700"
+                                    disabled={walletData.balance < 100}
+                                  >
+                                    Create Wallet
+                                  </button>
+                                </form>
+                              </div>
+                            )}
+                            
+                            {/* Revoke Device Button */}
+                            <div className="mt-4 pt-4 border-t border-gray-200">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleRevokeDevice(device.id);
+                                }}
+                                className="text-red-500 hover:text-red-700 text-sm flex items-center"
+                              >
+                                <XCircle className="h-4 w-4 mr-1" />
+                                Revoke Device
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* IoT Payment Form */}
-              {devices.filter(d => d.status === 'active').length > 0 && (
-                <div className="bg-blue-50 rounded-lg p-4">
-                  <h3 className="font-semibold text-gray-700 mb-3 flex items-center">
-                    <Radio className="h-5 w-5 mr-2 text-blue-600" />
-                    Make IoT Payment
-                  </h3>
-                  <form onSubmit={handleIoTPayment} className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                    <select
-                      value={iotPaymentForm.deviceId}
-                      onChange={(e) => setIotPaymentForm({ ...iotPaymentForm, deviceId: e.target.value })}
-                      className="border-2 border-gray-200 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none bg-white"
-                      required
-                    >
-                      <option value="">Select Device</option>
-                      {devices.filter(d => d.status === 'active').map((d) => (
-                        <option key={d.id} value={d.id}>{d.device_name}</option>
-                      ))}
-                    </select>
-                    <select
-                      value={iotPaymentForm.toWallet}
-                      onChange={(e) => setIotPaymentForm({ ...iotPaymentForm, toWallet: e.target.value })}
-                      className="border-2 border-gray-200 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none bg-white"
-                      required
-                    >
-                      <option value="">Select Recipient</option>
-                      {allWallets.map((w) => (
-                        <option key={w.id} value={w.id}>{w.name}</option>
-                      ))}
-                    </select>
-                    <div className="relative">
-                      <span className="absolute left-3 top-3 text-gray-500 font-bold">₹</span>
-                      <input
-                        type="number"
-                        placeholder="Amount"
-                        value={iotPaymentForm.amount}
-                        onChange={(e) => setIotPaymentForm({ ...iotPaymentForm, amount: e.target.value })}
-                        className="border-2 border-gray-200 rounded-lg pl-8 pr-4 py-3 w-full focus:border-blue-500 focus:outline-none"
-                        required
-                        min="1"
-                      />
-                    </div>
-                    <button
-                      type="submit"
-                      className="bg-blue-600 text-white rounded-lg px-6 py-3 font-semibold hover:bg-blue-700 transition flex items-center justify-center"
-                    >
-                      <Radio className="h-5 w-5 mr-2" />
-                      Tap to Pay
-                    </button>
-                  </form>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -1310,239 +2486,12 @@ function WalletDashboard({ wallet, fiApi, fiName, onBack }) {
             </div>
           )}
 
-          {/* Sub-Wallets Tab (Paper Section 3.2) */}
-          {activeTab === 'subwallets' && (
-            <div className="p-6">
-              <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center">
-                <Smartphone className="h-6 w-6 mr-2 text-purple-600" />
-                IoT Sub-Wallets (Paper §3.2)
-              </h2>
-              
-              <div className="bg-purple-50 border-2 border-purple-200 rounded-lg p-4 mb-6">
-                <p className="text-purple-800 text-sm">
-                  Sub-wallets allow you to allocate limited funds to IoT devices (smartwatches, rings, etc.) for contactless payments.
-                  Each sub-wallet has its own spending limit as defined in the paper's AML/CFT compliance (max ₹25,000).
-                  Sub-wallet balance is deducted from your main wallet. Revoke to return all funds.
-                </p>
-                <div className="mt-2 text-xs text-purple-600">
-                  Main Wallet: {formatRupees(walletData.balance)} | In Sub-Wallets: {formatRupees(subWallets.reduce((sum, sw) => sum + sw.balance, 0))} | Total: {formatRupees(walletData.balance + subWallets.reduce((sum, sw) => sum + sw.balance, 0))}
-                </div>
-              </div>
-
-              {/* Create Sub-Wallet Form - Must have device registered first */}
-              {devices.length === 0 ? (
-                <div className="bg-yellow-50 border-2 border-yellow-200 rounded-lg p-4 mb-6">
-                  <p className="text-yellow-800 text-sm">
-                    ⚠️ You need to register an IoT device first (in the "IoT Devices" tab) before creating a sub-wallet.
-                  </p>
-                </div>
-              ) : (
-                <form onSubmit={handleCreateSubWallet} className="bg-gray-50 rounded-lg p-4 mb-6">
-                  <h3 className="font-semibold text-gray-700 mb-3">Create New Sub-Wallet for Device</h3>
-                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                    <select
-                      value={subWalletForm.deviceId || ''}
-                      onChange={(e) => setSubWalletForm({ ...subWalletForm, deviceId: e.target.value })}
-                      className="border-2 border-gray-200 rounded-lg px-4 py-3 focus:border-purple-500 focus:outline-none"
-                      required
-                    >
-                      <option value="">Select Device</option>
-                      {devices.filter(d => d.status === 'active' && !subWallets.some(sw => sw.device_id === d.id)).map((d) => (
-                        <option key={d.id} value={d.id}>{d.device_name || d.device_type} ({d.device_type})</option>
-                      ))}
-                    </select>
-                    <div className="relative">
-                      <span className="absolute left-3 top-3 text-gray-500 font-bold">₹</span>
-                      <input
-                        type="number"
-                        placeholder="Initial Balance"
-                        value={subWalletForm.balance || ''}
-                        onChange={(e) => setSubWalletForm({ ...subWalletForm, balance: e.target.value })}
-                        className="border-2 border-gray-200 rounded-lg pl-8 pr-4 py-3 w-full focus:border-purple-500 focus:outline-none"
-                        max={Math.min(walletData.balance, 25000)}
-                        min="100"
-                        required
-                      />
-                    </div>
-                    <div className="relative">
-                      <span className="absolute left-3 top-3 text-gray-500 font-bold">₹</span>
-                      <input
-                        type="number"
-                        placeholder="Spending Limit (max ₹25,000)"
-                        value={subWalletForm.spendingLimit}
-                        onChange={(e) => setSubWalletForm({ ...subWalletForm, spendingLimit: e.target.value })}
-                        className="border-2 border-gray-200 rounded-lg pl-8 pr-4 py-3 w-full focus:border-purple-500 focus:outline-none"
-                        max="25000"
-                        min="100"
-                      />
-                    </div>
-                    <button
-                      type="submit"
-                      className="bg-purple-600 text-white rounded-lg px-6 py-3 font-semibold hover:bg-purple-700 transition flex items-center justify-center"
-                      disabled={walletData.balance < 100}
-                    >
-                      <Plus className="h-5 w-5 mr-2" />
-                      Create
-                    </button>
-                  </div>
-                  <p className="text-xs text-gray-500 mt-2">Creating sub-wallet will deduct balance from your main wallet</p>
-                </form>
-              )}
-
-              {/* Sub-Wallets List */}
-              <h3 className="font-semibold text-gray-700 mb-3">Your Sub-Wallets</h3>
-              {subWallets.length === 0 ? (
-                <div className="text-center py-8 text-gray-500 border-2 border-dashed border-gray-200 rounded-lg">
-                  <Smartphone className="h-12 w-12 mx-auto mb-4 text-gray-300" />
-                  <p>No sub-wallets created</p>
-                  <p className="text-sm">Register a device and create a sub-wallet to allocate funds</p>
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-                  {subWallets.map((sw) => (
-                    <div key={sw.id} className={`border-2 rounded-lg p-4 ${sw.status === 'active' ? 'border-purple-200 bg-purple-50' : 'border-gray-200 bg-gray-50'}`}>
-                      <div className="flex items-center justify-between mb-3">
-                        <div className="flex items-center space-x-3">
-                          <div className={`p-2 rounded-full ${sw.status === 'active' ? 'bg-purple-100' : 'bg-gray-200'}`}>
-                            {getDeviceIcon(sw.device_type)}
-                          </div>
-                          <div>
-                            <p className="font-medium">{sw.device_type}</p>
-                            <p className="text-xs text-gray-500">Limit: {formatRupees(sw.spending_limit)} | Daily: {formatRupees(sw.daily_spent || 0)}/{formatRupees(sw.daily_limit)}</p>
-                          </div>
-                        </div>
-                        <span className={`px-2 py-1 rounded text-xs ${
-                          sw.status === 'active' ? 'bg-green-100 text-green-800' : 
-                          sw.status === 'revoked' ? 'bg-red-100 text-red-800' : 'bg-gray-100'}`}>
-                          {sw.status}
-                        </span>
-                      </div>
-                      <div className="bg-white rounded p-3 mb-3">
-                        <p className="text-sm text-gray-500">Balance</p>
-                        <p className="text-2xl font-bold text-purple-600">{formatRupees(sw.balance)}</p>
-                      </div>
-                      {sw.status === 'active' && (
-                        <div className="flex space-x-2">
-                          <button
-                            onClick={() => handleReturnFromSubWallet(sw.id)}
-                            className="flex-1 bg-gray-200 text-gray-700 rounded px-3 py-2 text-sm hover:bg-gray-300 transition"
-                            disabled={sw.balance <= 0}
-                          >
-                            Return Funds
-                          </button>
-                          <button
-                            onClick={() => handleRevokeSubWallet(sw.id)}
-                            className="flex-1 bg-red-100 text-red-700 rounded px-3 py-2 text-sm hover:bg-red-200 transition"
-                          >
-                            Revoke
-                          </button>
-                        </div>
-                      )}
-                      {sw.status === 'revoked' && (
-                        <p className="text-xs text-center text-gray-500">Sub-wallet revoked - funds returned to main wallet</p>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Allocate to Sub-Wallet */}
-              {subWallets.filter(sw => sw.status === 'active').length > 0 && (
-                <div className="bg-blue-50 rounded-lg p-4 mb-6">
-                  <h3 className="font-semibold text-gray-700 mb-3">Allocate More Funds to Sub-Wallet</h3>
-                  <form onSubmit={handleAllocateToSubWallet} className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <select
-                      value={allocateSubForm.subWalletId}
-                      onChange={(e) => setAllocateSubForm({ ...allocateSubForm, subWalletId: e.target.value })}
-                      className="border-2 border-gray-200 rounded-lg px-4 py-3 focus:border-blue-500 focus:outline-none bg-white"
-                      required
-                    >
-                      <option value="">Select Sub-Wallet</option>
-                      {subWallets.filter(sw => sw.status === 'active').map((sw) => (
-                        <option key={sw.id} value={sw.id}>{sw.device_type} ({formatRupees(sw.balance)} / {formatRupees(sw.spending_limit)})</option>
-                      ))}
-                    </select>
-                    <div className="relative">
-                      <span className="absolute left-3 top-3 text-gray-500 font-bold">₹</span>
-                      <input
-                        type="number"
-                        placeholder="Amount"
-                        value={allocateSubForm.amount}
-                        onChange={(e) => setAllocateSubForm({ ...allocateSubForm, amount: e.target.value })}
-                        className="border-2 border-gray-200 rounded-lg pl-8 pr-4 py-3 w-full focus:border-blue-500 focus:outline-none"
-                        required
-                        min="1"
-                        max={walletData.balance}
-                      />
-                    </div>
-                    <button
-                      type="submit"
-                      className="bg-blue-600 text-white rounded-lg px-6 py-3 font-semibold hover:bg-blue-700 transition"
-                      disabled={walletData.balance <= 0}
-                    >
-                      Allocate
-                    </button>
-                  </form>
-                </div>
-              )}
-
-              {/* Sub-Wallet Payment */}
-              {subWallets.filter(sw => sw.balance > 0 && sw.status === 'active').length > 0 && (
-                <div className="bg-green-50 rounded-lg p-4">
-                  <h3 className="font-semibold text-gray-700 mb-3">Pay from Sub-Wallet</h3>
-                  <form onSubmit={handleSubWalletPayment} className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                    <select
-                      value={subWalletPayForm.subWalletId}
-                      onChange={(e) => setSubWalletPayForm({ ...subWalletPayForm, subWalletId: e.target.value })}
-                      className="border-2 border-gray-200 rounded-lg px-4 py-3 focus:border-green-500 focus:outline-none bg-white"
-                      required
-                    >
-                      <option value="">Select Sub-Wallet</option>
-                      {subWallets.filter(sw => sw.balance > 0 && sw.status === 'active').map((sw) => (
-                        <option key={sw.id} value={sw.id}>{sw.device_type} ({formatRupees(sw.balance)})</option>
-                      ))}
-                    </select>
-                    <select
-                      value={subWalletPayForm.toWallet}
-                      onChange={(e) => setSubWalletPayForm({ ...subWalletPayForm, toWallet: e.target.value })}
-                      className="border-2 border-gray-200 rounded-lg px-4 py-3 focus:border-green-500 focus:outline-none bg-white"
-                      required
-                    >
-                      <option value="">Select Recipient</option>
-                      {allWallets.map((w) => (
-                        <option key={w.id} value={w.id}>{w.name}</option>
-                      ))}
-                    </select>
-                    <div className="relative">
-                      <span className="absolute left-3 top-3 text-gray-500 font-bold">₹</span>
-                      <input
-                        type="number"
-                        placeholder="Amount"
-                        value={subWalletPayForm.amount}
-                        onChange={(e) => setSubWalletPayForm({ ...subWalletPayForm, amount: e.target.value })}
-                        className="border-2 border-gray-200 rounded-lg pl-8 pr-4 py-3 w-full focus:border-green-500 focus:outline-none"
-                        required
-                        min="1"
-                      />
-                    </div>
-                    <button
-                      type="submit"
-                      className="bg-green-600 text-white rounded-lg px-6 py-3 font-semibold hover:bg-green-700 transition"
-                    >
-                      Pay
-                    </button>
-                  </form>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Compliance Tab (Paper Section 3.4) */}
+          {/* Compliance Tab */}
           {activeTab === 'compliance' && (
             <div className="p-6">
               <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center">
                 <Shield className="h-6 w-6 mr-2 text-red-600" />
-                AML/CFT Compliance (Paper §3.4)
+                AML/CFT Compliance
               </h2>
               
               <div className="bg-red-50 border-2 border-red-200 rounded-lg p-4 mb-6">
@@ -1717,8 +2666,8 @@ function App() {
       ]);
       
       const wallets = [
-        ...(fi1Wallets.wallets || []).map(w => ({ ...w, fi: 'FI-Alpha', fiApi: fi1Api })),
-        ...(fi2Wallets.wallets || []).map(w => ({ ...w, fi: 'FI-Beta', fiApi: fi2Api }))
+        ...(fi1Wallets.wallets || []).map(w => ({ ...w, fi: 'SBI', fiApi: fi1Api })),
+        ...(fi2Wallets.wallets || []).map(w => ({ ...w, fi: 'HDFC', fiApi: fi2Api }))
       ];
       setAllUserWallets(wallets);
       if (supplyRes?.moneySupply) setMoneySupply(supplyRes.moneySupply);
@@ -1747,7 +2696,7 @@ function App() {
 
   const handleBackFromWallet = () => {
     if (selectedFiName) {
-      setCurrentView(selectedFiName === 'FI-Alpha' ? 'fi1' : 'fi2');
+      setCurrentView((selectedFiName === 'FI-Alpha' || selectedFiName === 'SBI') ? 'fi1' : 'fi2');
     } else {
       setCurrentView('user-wallets');
     }
@@ -1778,7 +2727,7 @@ function App() {
             <span>Back to Home</span>
           </button>
         </nav>
-        <FIDashboard fiApi={fi1Api} fiName="FI-Alpha" fiColor="green" onSelectWallet={handleSelectWallet} />
+        <FIDashboard fiApi={fi1Api} fiName="SBI" fiColor="blue" onSelectWallet={handleSelectWallet} />
       </>
     );
   }
@@ -1792,7 +2741,7 @@ function App() {
             <span>Back to Home</span>
           </button>
         </nav>
-        <FIDashboard fiApi={fi2Api} fiName="FI-Beta" fiColor="purple" onSelectWallet={handleSelectWallet} />
+        <FIDashboard fiApi={fi2Api} fiName="HDFC" fiColor="red" onSelectWallet={handleSelectWallet} />
       </>
     );
   }
@@ -1894,10 +2843,10 @@ function App() {
           <p className="text-gray-400">Central Bank Digital Currency Payment System Using IoT Devices</p>
           {moneySupply && (
             <div className="mt-4 inline-flex items-center space-x-6 bg-gray-800 rounded-full px-6 py-2">
-              <span className="text-green-400">💰 Total Circulation: {formatRupees(moneySupply.totalCreated)}</span>
-              <span className="text-blue-400">🏛️ In FIs: {formatRupees(moneySupply.breakdown?.inFIs || 0)}</span>
-              <span className="text-purple-400">👛 In Wallets: {formatRupees(moneySupply.breakdown?.inWallets || 0)}</span>
-              <span className="text-yellow-400">📱 In Sub-Wallets: {formatRupees(moneySupply.breakdown?.inSubWallets || 0)}</span>
+              <span className="text-green-400">Total Circulation: {formatRupees(moneySupply.totalCreated)}</span>
+              <span className="text-blue-400">In FIs: {formatRupees(moneySupply.breakdown?.inFIs || 0)}</span>
+              <span className="text-purple-400">In Wallets: {formatRupees(moneySupply.breakdown?.inWallets || 0)}</span>
+              <span className="text-yellow-400">In Sub-Wallets: {formatRupees(moneySupply.breakdown?.inSubWallets || 0)}</span>
             </div>
           )}
         </div>
@@ -1920,13 +2869,7 @@ function App() {
                   <Building2 className="h-10 w-10 text-blue-900" />
                 </div>
                 <h3 className="text-2xl font-bold mb-2">Reserve Bank of India</h3>
-                <p className="text-blue-200 mb-4">Central Bank Dashboard - Issuer of Digital Rupee</p>
-                <ul className="text-sm text-blue-100 space-y-1">
-                  <li>• Issue & Allocate Digital Rupees to FIs</li>
-                  <li>• View All Registered Financial Institutions</li>
-                  <li>• Monitor Ledger & Money Supply</li>
-                  <li>• AML/CFT Compliance Oversight</li>
-                </ul>
+                <p className="text-blue-200">Central Bank Dashboard - Issuer of Digital Rupee</p>
               </div>
               <div className="text-right">
                 {moneySupply && (
@@ -1948,67 +2891,67 @@ function App() {
             Financial Institutions
           </h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {/* FI-Alpha Card */}
+            {/* SBI Card */}
             <div 
               onClick={() => setCurrentView('fi1')}
-              className="bg-gradient-to-br from-green-600 to-green-800 rounded-2xl p-6 text-white cursor-pointer hover:scale-[1.02] transition-transform shadow-xl"
+              className="bg-gradient-to-br from-blue-600 to-blue-900 rounded-2xl p-6 text-white cursor-pointer hover:scale-[1.02] transition-transform shadow-xl"
             >
               <div className="flex items-center space-x-4 mb-4">
-                <div className="bg-green-300 w-14 h-14 rounded-full flex items-center justify-center">
-                  <Building2 className="h-8 w-8 text-green-900" />
+                <div className="bg-white w-14 h-14 rounded-full flex items-center justify-center overflow-hidden p-1">
+                  <img 
+                    src="https://upload.wikimedia.org/wikipedia/en/thumb/5/58/State_Bank_of_India_logo.svg/200px-State_Bank_of_India_logo.svg.png" 
+                    alt="SBI Logo"
+                    className="w-10 h-10 object-contain"
+                    onError={(e) => { e.target.onerror = null; e.target.src = ''; e.target.parentElement.innerHTML = '<span class="text-blue-900 font-bold text-lg">SBI</span>'; }}
+                  />
                 </div>
                 <div>
-                  <h3 className="text-xl font-bold">FI-Alpha</h3>
-                  <p className="text-green-200 text-sm">Financial Institution 1 • Port 4001</p>
+                  <h3 className="text-xl font-bold">State Bank of India</h3>
+                  <p className="text-blue-200 text-sm">SBI • Port 4001</p>
                 </div>
               </div>
-              <ul className="text-sm text-green-100 space-y-1 mb-4">
-                <li>• Create User Wallets with Public Keys</li>
-                <li>• Credit Wallets from FI Allocation</li>
-                <li>• Sync Transactions to Central Bank</li>
-              </ul>
               {moneySupply?.fiBreakdown && (
-                <div className="bg-green-900/50 rounded-lg p-3 mb-4">
-                  <p className="text-green-300 text-xs">Allocated / In Wallets</p>
+                <div className="bg-blue-900/50 rounded-lg p-3 mb-4">
+                  <p className="text-blue-300 text-xs">Allocated / In Wallets</p>
                   <p className="text-xl font-bold">
-                    {formatRupees(moneySupply.fiBreakdown.find(f => f.name === 'FI-Alpha')?.allocated || 0)}
+                    {formatRupees(moneySupply.fiBreakdown.find(f => f.name === 'FI-Alpha' || f.name === 'SBI')?.allocated || 0)}
                   </p>
                 </div>
               )}
               <div className="text-right">
-                <span className="bg-green-500 px-4 py-2 rounded-full text-sm">Open Dashboard →</span>
+                <span className="bg-blue-500 px-4 py-2 rounded-full text-sm">Open Dashboard →</span>
               </div>
             </div>
 
-            {/* FI-Beta Card */}
+            {/* HDFC Card */}
             <div 
               onClick={() => setCurrentView('fi2')}
-              className="bg-gradient-to-br from-purple-600 to-purple-800 rounded-2xl p-6 text-white cursor-pointer hover:scale-[1.02] transition-transform shadow-xl"
+              className="bg-gradient-to-br from-red-600 to-red-900 rounded-2xl p-6 text-white cursor-pointer hover:scale-[1.02] transition-transform shadow-xl"
             >
               <div className="flex items-center space-x-4 mb-4">
-                <div className="bg-purple-300 w-14 h-14 rounded-full flex items-center justify-center">
-                  <Building2 className="h-8 w-8 text-purple-900" />
+                <div className="bg-white w-14 h-14 rounded-full flex items-center justify-center overflow-hidden p-1">
+                  <img 
+                    src="https://upload.wikimedia.org/wikipedia/commons/thumb/2/28/HDFC_Bank_Logo.svg/200px-HDFC_Bank_Logo.svg.png" 
+                    alt="HDFC Logo"
+                    className="w-10 h-10 object-contain"
+                    onError={(e) => { e.target.onerror = null; e.target.src = ''; e.target.parentElement.innerHTML = '<span class="text-red-900 font-bold text-sm">HDFC</span>'; }}
+                  />
                 </div>
                 <div>
-                  <h3 className="text-xl font-bold">FI-Beta</h3>
-                  <p className="text-purple-200 text-sm">Financial Institution 2 • Port 4002</p>
+                  <h3 className="text-xl font-bold">HDFC Bank</h3>
+                  <p className="text-red-200 text-sm">HDFC • Port 4002</p>
                 </div>
               </div>
-              <ul className="text-sm text-purple-100 space-y-1 mb-4">
-                <li>• Create User Wallets with Public Keys</li>
-                <li>• Credit Wallets from FI Allocation</li>
-                <li>• Sync Transactions to Central Bank</li>
-              </ul>
               {moneySupply?.fiBreakdown && (
-                <div className="bg-purple-900/50 rounded-lg p-3 mb-4">
-                  <p className="text-purple-300 text-xs">Allocated / In Wallets</p>
+                <div className="bg-red-900/50 rounded-lg p-3 mb-4">
+                  <p className="text-red-300 text-xs">Allocated / In Wallets</p>
                   <p className="text-xl font-bold">
-                    {formatRupees(moneySupply.fiBreakdown.find(f => f.name === 'FI-Beta')?.allocated || 0)}
+                    {formatRupees(moneySupply.fiBreakdown.find(f => f.name === 'FI-Beta' || f.name === 'HDFC')?.allocated || 0)}
                   </p>
                 </div>
               )}
               <div className="text-right">
-                <span className="bg-purple-500 px-4 py-2 rounded-full text-sm">Open Dashboard →</span>
+                <span className="bg-red-500 px-4 py-2 rounded-full text-sm">Open Dashboard →</span>
               </div>
             </div>
           </div>
@@ -2035,12 +2978,6 @@ function App() {
                     <p className="text-indigo-200 text-sm">View wallets created by FIs • Managed by Users</p>
                   </div>
                 </div>
-                <ul className="text-sm text-indigo-100 space-y-1">
-                  <li>• Each wallet has a unique Public Key for transactions</li>
-                  <li>• Users manage their own IoT Sub-Wallets</li>
-                  <li>• Make P2P and Cross-FI transfers</li>
-                  <li>• Offline transactions with ZKP authentication</li>
-                </ul>
               </div>
               <div className="text-right">
                 <div className="bg-indigo-900/50 rounded-lg p-4 mb-4">

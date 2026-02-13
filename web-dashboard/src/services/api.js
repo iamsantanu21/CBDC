@@ -44,12 +44,16 @@ export const centralBankApi = {
     return res.json();
   },
   
-  // Cross-FI Transaction Routing
-  async routeCrossFI(sourceFiName, targetFiName, fromWallet, toWallet, amount, description) {
+  // Cross-FI Transaction Routing (supports wallets and sub-wallets)
+  async routeCrossFI(sourceFiName, targetFiName, fromWallet, toWallet, toSubWallet, amount, description = '', recipientType = 'wallet') {
+    const payload = { sourceFiName, targetFiName, fromWallet, toWallet, amount, description, recipientType };
+    if (recipientType === 'subwallet' && toSubWallet) {
+      payload.toSubWallet = toSubWallet;
+    }
     const res = await fetch(`${CENTRAL_BANK_URL}/api/ledger/cross-fi`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sourceFiName, targetFiName, fromWallet, toWallet, amount, description })
+      body: JSON.stringify(payload)
     });
     return res.json();
   },
@@ -111,6 +115,142 @@ export const centralBankApi = {
       body: JSON.stringify({ proof, publicInputs, proofType })
     });
     return res.json();
+  },
+
+  // ========== COMPLIANCE CONTROL APIs ==========
+  
+  // Get compliance dashboard summary
+  async getComplianceDashboard() {
+    const res = await fetch(`${CENTRAL_BANK_URL}/api/compliance/dashboard`);
+    return res.json();
+  },
+  
+  // Compliance Rules
+  async getComplianceRules(targetType = null, activeOnly = true) {
+    const params = new URLSearchParams();
+    if (targetType) params.append('targetType', targetType);
+    params.append('activeOnly', activeOnly.toString());
+    const res = await fetch(`${CENTRAL_BANK_URL}/api/compliance/rules?${params}`);
+    return res.json();
+  },
+  
+  async setComplianceRule(ruleData) {
+    const res = await fetch(`${CENTRAL_BANK_URL}/api/compliance/rules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ruleData)
+    });
+    return res.json();
+  },
+  
+  async deleteComplianceRule(ruleId) {
+    const res = await fetch(`${CENTRAL_BANK_URL}/api/compliance/rules/${ruleId}`, {
+      method: 'DELETE'
+    });
+    return res.json();
+  },
+  
+  // Alerts
+  async getAlerts(filters = {}) {
+    const params = new URLSearchParams();
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) params.append(key, value);
+    });
+    const res = await fetch(`${CENTRAL_BANK_URL}/api/compliance/alerts?${params}`);
+    return res.json();
+  },
+  
+  async getAlertStats() {
+    const res = await fetch(`${CENTRAL_BANK_URL}/api/compliance/alerts/stats`);
+    return res.json();
+  },
+  
+  async markAlertRead(alertId) {
+    const res = await fetch(`${CENTRAL_BANK_URL}/api/compliance/alerts/${alertId}/read`, {
+      method: 'PUT'
+    });
+    return res.json();
+  },
+  
+  async resolveAlert(alertId, resolvedBy = 'admin') {
+    const res = await fetch(`${CENTRAL_BANK_URL}/api/compliance/alerts/${alertId}/resolve`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resolved_by: resolvedBy })
+    });
+    return res.json();
+  },
+  
+  async markAllAlertsRead() {
+    const res = await fetch(`${CENTRAL_BANK_URL}/api/compliance/alerts/mark-all-read`, {
+      method: 'POST'
+    });
+    return res.json();
+  },
+  
+  // Watchlist
+  async getWatchlist(filters = {}) {
+    const params = new URLSearchParams();
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) params.append(key, value);
+    });
+    const res = await fetch(`${CENTRAL_BANK_URL}/api/compliance/watchlist?${params}`);
+    return res.json();
+  },
+  
+  async addToWatchlist(entityType, entityId, fiId, status, reason, riskLevel = 'medium') {
+    const res = await fetch(`${CENTRAL_BANK_URL}/api/compliance/watchlist`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entity_type: entityType, entity_id: entityId, fi_id: fiId, status, reason, risk_level: riskLevel })
+    });
+    return res.json();
+  },
+  
+  async removeFromWatchlist(entityType, entityId, fiId = null) {
+    const res = await fetch(`${CENTRAL_BANK_URL}/api/compliance/watchlist/${entityType}/${entityId}?fi_id=${fiId || ''}`, {
+      method: 'DELETE'
+    });
+    return res.json();
+  },
+  
+  // Freeze/Unfreeze
+  async getFrozenEntities(fiId = null) {
+    const res = await fetch(`${CENTRAL_BANK_URL}/api/compliance/frozen${fiId ? `?fi_id=${fiId}` : ''}`);
+    return res.json();
+  },
+  
+  async freezeEntity(entityType, entityId, fiId, reason, frozenBy = 'admin') {
+    const res = await fetch(`${CENTRAL_BANK_URL}/api/compliance/freeze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entity_type: entityType, entity_id: entityId, fi_id: fiId, reason, frozen_by: frozenBy })
+    });
+    return res.json();
+  },
+  
+  async unfreezeEntity(entityType, entityId, fiId, unfrozenBy = 'admin') {
+    const res = await fetch(`${CENTRAL_BANK_URL}/api/compliance/unfreeze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entity_type: entityType, entity_id: entityId, fi_id: fiId, unfrozen_by: unfrozenBy })
+    });
+    return res.json();
+  },
+  
+  async checkEntityFrozen(entityType, entityId, fiId = null) {
+    const res = await fetch(`${CENTRAL_BANK_URL}/api/compliance/frozen/check/${entityType}/${entityId}?fi_id=${fiId || ''}`);
+    return res.json();
+  },
+  
+  // Transaction Compliance Check
+  async checkTransactionCompliance(fiId, walletId, deviceId, amount, txType = 'online') {
+    const res = await fetch(`${CENTRAL_BANK_URL}/api/compliance/check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fi_id: fiId, wallet_id: walletId, device_id: deviceId, amount, tx_type: txType })
+    });
+    return res.json();
   }
 };
 
@@ -170,6 +310,16 @@ function createFIApi(baseUrl) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ fromWallet, toWallet, amount, description, targetFi })
+      });
+      return res.json();
+    },
+    
+    // Pay from wallet to another wallet's sub-wallet (same FI)
+    async payToSubWallet(fromWallet, toWalletId, toSubWalletId, amount, description = '') {
+      const res = await fetch(`${baseUrl}/api/transaction/pay-to-subwallet`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fromWallet, toWalletId, toSubWalletId, amount, description })
       });
       return res.json();
     },
@@ -353,6 +503,11 @@ function createFIApi(baseUrl) {
       return res.json();
     },
     
+    async getSubWalletTransactions(subWalletId) {
+      const res = await fetch(`${baseUrl}/api/wallet/subwallet/${subWalletId}/transactions`);
+      return res.json();
+    },
+    
     // ========== NEW: Compliance APIs ==========
     async getWalletCompliance(walletId) {
       const res = await fetch(`${baseUrl}/api/wallet/${walletId}/compliance`);
@@ -390,12 +545,12 @@ export const fi2Api = createFIApi(FI2_URL);
 
 // Helper to get FI API by ID or name
 export function getFIApi(fiId) {
-  if (fiId === 'fi-001' || fiId === 'fi1' || fiId === 'FI-Alpha') return fi1Api;
-  if (fiId === 'fi-002' || fiId === 'fi2' || fiId === 'FI-Beta') return fi2Api;
+  if (fiId === 'fi-001' || fiId === 'fi1' || fiId === 'FI-Alpha' || fiId === 'SBI' || fiId === 'fi-alpha' || fiId === 'sbi') return fi1Api;
+  if (fiId === 'fi-002' || fiId === 'fi2' || fiId === 'FI-Beta' || fiId === 'HDFC' || fiId === 'fi-beta' || fiId === 'hdfc') return fi2Api;
   return null;
 }
 
 // Helper to get the other FI's name
 export function getOtherFIName(currentFiName) {
-  return currentFiName === 'FI-Alpha' ? 'FI-Beta' : 'FI-Alpha';
+  return (currentFiName === 'FI-Alpha' || currentFiName === 'SBI') ? 'HDFC' : 'SBI';
 }

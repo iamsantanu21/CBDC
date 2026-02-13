@@ -27,7 +27,18 @@ import {
   getSecureElementLogs,
   getMonotonicCounter,
   setWalletOfflineMode,
-  setSubWalletOfflineMode
+  setSubWalletOfflineMode,
+  // IoT sync functions
+  createIoTOfflineTransaction,
+  getPendingIoTTransactions,
+  syncIoTToWallet,
+  syncAllSubWalletsToWallet,
+  getWalletIoTTransactions,
+  getSyncStatus,
+  getTransactionsPendingSyncToFI,
+  markIoTTransactionsSyncedToFI,
+  // IoT transaction history
+  getSubWalletTransactions
 } from '../database.js';
 
 const router = express.Router();
@@ -213,6 +224,49 @@ router.get('/:id/subwallets', async (req, res) => {
   }
 });
 
+// Get transaction history for all IoT devices under a main wallet
+router.get('/:id/iot-transactions', async (req, res) => {
+  try {
+    const subWallets = await getSubWalletsByMainWallet(req.params.id);
+    
+    const deviceHistories = [];
+    let totalTransactions = 0;
+    let totalOutgoing = 0;
+    let totalIncoming = 0;
+    
+    for (const subWallet of subWallets) {
+      try {
+        const history = await getSubWalletTransactions(subWallet.id);
+        deviceHistories.push({
+          device: history.subWallet,
+          transactions: history.transactions,
+          summary: history.summary
+        });
+        totalTransactions += history.summary.total_transactions;
+        totalOutgoing += history.summary.total_outgoing;
+        totalIncoming += history.summary.total_incoming;
+      } catch (err) {
+        // Skip if sub-wallet has issues
+      }
+    }
+    
+    res.json({ 
+      success: true, 
+      walletId: req.params.id,
+      devices: deviceHistories,
+      overallSummary: {
+        total_devices: subWallets.length,
+        total_transactions: totalTransactions,
+        total_outgoing: totalOutgoing,
+        total_incoming: totalIncoming,
+        net_flow: totalIncoming - totalOutgoing
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Allocate funds to sub-wallet
 router.post('/:id/subwallet/:subId/allocate', async (req, res) => {
   try {
@@ -370,6 +424,144 @@ router.get('/:id/secure-element/logs', async (req, res) => {
     const logs = await getSecureElementLogs(req.params.id, limit);
     const counter = await getMonotonicCounter(req.params.id);
     res.json({ success: true, monotonicCounter: counter, logs });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// IOT OFFLINE TRANSACTION & SYNC ENDPOINTS
+// ============================================
+
+// Create IoT offline transaction from sub-wallet
+router.post('/subwallet/:subId/offline-transaction', async (req, res) => {
+  try {
+    const { subId } = req.params;
+    const { toWallet, amount, description, toFi, zkpProof } = req.body;
+    
+    if (!toWallet || !amount || amount <= 0) {
+      return res.status(400).json({ error: 'Valid toWallet and amount are required' });
+    }
+    
+    const transaction = await createIoTOfflineTransaction(subId, toWallet, amount, description, toFi, zkpProof);
+    console.log(`📱 IoT Offline TX: ${subId} → ${toWallet} : ₹${amount}`);
+    
+    res.json({ success: true, transaction });
+  } catch (error) {
+    console.error('Error creating IoT offline transaction:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get pending IoT transactions for a sub-wallet
+router.get('/subwallet/:subId/pending-transactions', async (req, res) => {
+  try {
+    const transactions = await getPendingIoTTransactions(req.params.subId);
+    res.json({ success: true, transactions, count: transactions.length });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get complete transaction history for a sub-wallet/IoT device
+router.get('/subwallet/:subId/transactions', async (req, res) => {
+  try {
+    const history = await getSubWalletTransactions(req.params.subId);
+    res.json({ success: true, ...history });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Sync sub-wallet transactions to main wallet
+router.post('/subwallet/:subId/sync', async (req, res) => {
+  try {
+    const result = await syncIoTToWallet(req.params.subId);
+    console.log(`🔄 Sub-wallet ${req.params.subId} synced: ${result.synced} transactions`);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('Error syncing sub-wallet:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Sync all sub-wallets to main wallet
+router.post('/:id/sync-subwallets', async (req, res) => {
+  try {
+    const result = await syncAllSubWalletsToWallet(req.params.id);
+    console.log(`🔄 Wallet ${req.params.id} sub-wallets synced: ${result.totalSynced} transactions`);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('Error syncing sub-wallets to wallet:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get all IoT transactions for a wallet
+router.get('/:id/iot-transactions', async (req, res) => {
+  try {
+    const transactions = await getWalletIoTTransactions(req.params.id);
+    res.json({ success: true, transactions, count: transactions.length });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get sync status summary
+router.get('/sync/status', async (req, res) => {
+  try {
+    const status = await getSyncStatus();
+    res.json({ success: true, ...status });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get transactions pending sync to FI
+router.get('/sync/pending-fi', async (req, res) => {
+  try {
+    const pending = await getTransactionsPendingSyncToFI();
+    res.json({ success: true, ...pending });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// WALLET VALIDATION ENDPOINTS
+// ============================================
+
+// Check if a wallet or sub-wallet exists locally
+router.get('/exists/:walletId', async (req, res) => {
+  try {
+    const { walletId } = req.params;
+    
+    // Check if it's a main wallet
+    const wallet = await getWallet(walletId);
+    if (wallet) {
+      return res.json({ 
+        exists: true, 
+        wallet_type: 'wallet',
+        wallet_id: wallet.id,
+        wallet_name: wallet.name
+      });
+    }
+    
+    // Check if it's a sub-wallet
+    const subWallet = await getSubWallet(walletId);
+    if (subWallet) {
+      const mainWallet = await getWallet(subWallet.main_wallet_id);
+      return res.json({ 
+        exists: true, 
+        wallet_type: 'sub_wallet',
+        wallet_id: subWallet.id,
+        wallet_name: mainWallet ? `${mainWallet.name} - ${subWallet.device_type}` : subWallet.id,
+        main_wallet_id: subWallet.main_wallet_id,
+        device_type: subWallet.device_type
+      });
+    }
+    
+    res.json({ exists: false });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

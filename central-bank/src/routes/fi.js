@@ -213,4 +213,112 @@ router.get('/allocations/all', async (req, res) => {
   }
 });
 
+// ============================================
+// WALLET VALIDATION ENDPOINTS
+// ============================================
+
+// Validate if a wallet/sub-wallet exists across any FI
+router.get('/wallet/validate/:walletId', async (req, res) => {
+  try {
+    const { walletId } = req.params;
+    const fis = await getAllFIs();
+    
+    // Query all FIs to check if wallet exists
+    const validationPromises = fis.map(async (fi) => {
+      if (!fi.endpoint) return null;
+      
+      try {
+        const response = await fetch(`${fi.endpoint}/api/wallet/exists/${walletId}`, {
+          timeout: 3000
+        });
+        if (response.ok) {
+          const data = await response.json();
+          if (data.exists) {
+            return { 
+              exists: true, 
+              fi_id: fi.id, 
+              fi_name: fi.name, 
+              wallet_type: data.wallet_type,
+              wallet_name: data.wallet_name
+            };
+          }
+        }
+      } catch (err) {
+        // FI unreachable, skip
+      }
+      return null;
+    });
+    
+    const results = await Promise.all(validationPromises);
+    const validResult = results.find(r => r && r.exists);
+    
+    if (validResult) {
+      res.json({ 
+        valid: true, 
+        ...validResult 
+      });
+    } else {
+      res.json({ 
+        valid: false, 
+        error: 'Wallet not found in any registered Financial Institution' 
+      });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get all registered wallets across system (for UI dropdowns)
+router.get('/wallet/all', async (req, res) => {
+  try {
+    const fis = await getAllFIs();
+    const allWallets = [];
+    
+    // Query all FIs for their wallet list
+    for (const fi of fis) {
+      if (!fi.endpoint) continue;
+      
+      try {
+        const response = await fetch(`${fi.endpoint}/api/wallet/list`);
+        if (response.ok) {
+          const data = await response.json();
+          const wallets = data.wallets || [];
+          wallets.forEach(w => {
+            allWallets.push({
+              id: w.id,
+              name: w.name,
+              type: 'wallet',
+              fi_id: fi.id,
+              fi_name: fi.name,
+              balance: w.balance
+            });
+            
+            // Also add sub-wallets if present
+            if (w.sub_wallets) {
+              w.sub_wallets.forEach(sw => {
+                allWallets.push({
+                  id: sw.id,
+                  name: `${w.name} - ${sw.device_type}`,
+                  type: 'sub_wallet',
+                  main_wallet_id: w.id,
+                  device_type: sw.device_type,
+                  fi_id: fi.id,
+                  fi_name: fi.name,
+                  balance: sw.balance
+                });
+              });
+            }
+          });
+        }
+      } catch (err) {
+        console.log(`Could not fetch wallets from ${fi.name}: ${err.message}`);
+      }
+    }
+    
+    res.json({ success: true, wallets: allWallets, count: allWallets.length });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;

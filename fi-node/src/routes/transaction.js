@@ -18,7 +18,12 @@ import {
   checkNullifier,
   getAllNullifiers,
   updateComplianceTracking,
-  checkTransactionCompliance
+  checkTransactionCompliance,
+  // IoT sync imports
+  getTransactionsPendingSyncToFI,
+  markIoTTransactionsSyncedToFI,
+  markIoTTransactionsSyncedToCB,
+  getSyncStatus
 } from '../database.js';
 import * as zkpEnhanced from '../../../shared/zkp-enhanced.js';
 
@@ -40,7 +45,44 @@ router.post('/create', async (req, res) => {
       return res.status(400).json({ error: 'Valid amount is required' });
     }
     
-    // AUTOMATIC: Check compliance limits before transaction (ZKP-based)
+    // CENTRAL BANK COMPLIANCE CHECK - Check if wallet is frozen/blacklisted
+    try {
+      const cbComplianceRes = await fetch(`${CENTRAL_BANK_URL}/api/compliance/check`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fi_id: FI_ID, wallet_id: fromWallet, amount, tx_type: 'online' })
+      });
+      const cbCompliance = await cbComplianceRes.json();
+      
+      if (cbCompliance.blocked) {
+        console.log(`🚫 CB BLOCKED: ${fromWallet} - ${cbCompliance.violations?.map(v => v.message).join(', ')}`);
+        return res.status(403).json({ 
+          error: 'Transaction blocked by Central Bank',
+          violations: cbCompliance.violations,
+          cbBlocked: true
+        });
+      }
+      
+      // Notify CB of high-value transactions
+      if (amount >= 25000) {
+        await fetch(`${CENTRAL_BANK_URL}/api/compliance/monitor`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fi_id: FI_ID,
+            wallet_id: fromWallet,
+            amount,
+            transaction_id: `tx-${Date.now()}`,
+            is_new_device: false
+          })
+        });
+      }
+    } catch (cbErr) {
+      console.log(`⚠️ CB compliance check unavailable: ${cbErr.message}`);
+      // Continue with local compliance if CB is unreachable
+    }
+    
+    // LOCAL: Check compliance limits before transaction (ZKP-based)
     const complianceCheck = await checkTransactionCompliance(fromWallet, amount, false);
     if (!complianceCheck.compliant) {
       console.log(`❌ Transaction blocked by compliance: ${complianceCheck.issues.join(', ')}`);
@@ -227,14 +269,39 @@ router.get('/wallet/:walletId', async (req, res) => {
   }
 });
 
-// Sync unsynced transactions with Central Bank
+// Sync unsynced transactions with Central Bank (including IoT transactions)
 router.post('/sync', async (req, res) => {
   try {
+    // Get regular unsynced transactions
     const unsyncedTransactions = await getUnsyncedTransactions();
     
-    if (unsyncedTransactions.length === 0) {
-      return res.json({ success: true, message: 'No transactions to sync', synced: 0 });
+    // Get IoT transactions pending sync to FI/CB
+    const pendingIoT = await getTransactionsPendingSyncToFI();
+    
+    const totalToSync = unsyncedTransactions.length + pendingIoT.iot.length;
+    
+    if (totalToSync === 0) {
+      return res.json({ success: true, message: 'No transactions to sync', synced: 0, iotSynced: 0 });
     }
+    
+    // Prepare all transactions for CB (combine regular + IoT)
+    const allTransactions = [
+      ...unsyncedTransactions,
+      ...pendingIoT.iot.map(iot => ({
+        id: iot.id,
+        from_wallet: iot.sub_wallet_id,
+        to_wallet: iot.to_wallet,
+        amount: iot.amount,
+        type: 'iot_offline',
+        description: iot.description || 'IoT offline transaction',
+        created_at: iot.created_at,
+        device_id: iot.device_id,
+        main_wallet_id: iot.main_wallet_id,
+        monotonic_counter: iot.monotonic_counter,
+        nullifier: iot.nullifier,
+        is_iot_transaction: true
+      }))
+    ];
     
     // Send to Central Bank
     const response = await fetch(`${CENTRAL_BANK_URL}/api/ledger/sync`, {
@@ -242,7 +309,7 @@ router.post('/sync', async (req, res) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         fiId: FI_ID,
-        transactions: unsyncedTransactions
+        transactions: allTransactions
       })
     });
     
@@ -252,14 +319,39 @@ router.post('/sync', async (req, res) => {
     
     const result = await response.json();
     
-    // Mark transactions as synced
-    const syncedIds = unsyncedTransactions.map(tx => tx.id);
-    await markTransactionsSynced(syncedIds);
+    // Mark regular transactions as synced
+    if (unsyncedTransactions.length > 0) {
+      const syncedIds = unsyncedTransactions.map(tx => tx.id);
+      await markTransactionsSynced(syncedIds);
+    }
     
-    console.log(`📤 Synced ${syncedIds.length} transactions to Central Bank`);
-    res.json({ success: true, synced: syncedIds.length, result });
+    // Mark IoT transactions as synced to FI and CB
+    if (pendingIoT.iot.length > 0) {
+      const iotIds = pendingIoT.iot.map(tx => tx.id);
+      await markIoTTransactionsSyncedToFI(iotIds);
+      await markIoTTransactionsSyncedToCB(iotIds);
+    }
+    
+    console.log(`📤 Synced ${unsyncedTransactions.length} regular + ${pendingIoT.iot.length} IoT transactions to Central Bank`);
+    res.json({ 
+      success: true, 
+      synced: unsyncedTransactions.length,
+      iotSynced: pendingIoT.iot.length,
+      total: totalToSync,
+      result 
+    });
   } catch (error) {
     console.error('Error syncing transactions:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get sync status summary
+router.get('/sync/status', async (req, res) => {
+  try {
+    const status = await getSyncStatus();
+    res.json({ success: true, ...status });
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
@@ -426,6 +518,128 @@ router.get('/compliance/limits', (req, res) => {
       SUB_WALLET_LIMIT: 'Maximum balance for sub-wallets'
     }
   });
+});
+
+// ========== PAY TO SUB-WALLET (Same FI) ==========
+// Allows payment from a wallet to another wallet's sub-wallet
+router.post('/pay-to-subwallet', async (req, res) => {
+  try {
+    const { fromWallet, toWalletId, toSubWalletId, amount, description } = req.body;
+    
+    if (!fromWallet || !toSubWalletId) {
+      return res.status(400).json({ error: 'fromWallet and toSubWalletId are required' });
+    }
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: 'Valid amount is required' });
+    }
+    
+    // Check compliance limits before transaction
+    const complianceCheck = await checkTransactionCompliance(fromWallet, amount, false);
+    if (!complianceCheck.compliant) {
+      return res.status(400).json({ 
+        error: 'Compliance limit exceeded',
+        details: complianceCheck.issues
+      });
+    }
+    
+    // Deduct from sender wallet and credit to recipient's sub-wallet
+    const transaction = await createTransaction(fromWallet, toSubWalletId, amount, description || 'Payment to IoT device');
+    
+    // Update compliance tracking
+    await updateComplianceTracking(fromWallet, amount, false);
+    
+    console.log(`💸 Payment to Sub-Wallet: ${fromWallet} → ${toSubWalletId} : ₹${amount}`);
+    
+    res.json({ success: true, transaction });
+  } catch (error) {
+    console.error('Error paying to sub-wallet:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ========== RECEIVE CROSS-FI PAYMENT TO SUB-WALLET ==========
+// Called by Central Bank when routing cross-FI payment to a sub-wallet
+router.post('/receive-cross-fi-subwallet', async (req, res) => {
+  try {
+    const { fromWallet, fromFi, toSubWalletId, amount, description, txId } = req.body;
+    
+    if (!toSubWalletId || !amount) {
+      return res.status(400).json({ error: 'toSubWalletId and amount are required' });
+    }
+    
+    // Import the function to credit sub-wallet directly
+    const { allocateToSubWallet, getSubWallet } = await import('../database.js');
+    
+    // Get the sub-wallet to verify it exists
+    const subWallet = await getSubWallet(toSubWalletId);
+    if (!subWallet) {
+      return res.status(404).json({ error: 'Sub-wallet not found' });
+    }
+    
+    // Credit the sub-wallet
+    await allocateToSubWallet(toSubWalletId, amount);
+    
+    console.log(`🌐 Cross-FI Payment to Sub-Wallet: ${fromWallet}@${fromFi} → ${toSubWalletId} : ₹${amount}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Cross-FI payment to sub-wallet received',
+      subWalletId: toSubWalletId,
+      amount
+    });
+  } catch (error) {
+    console.error('Error receiving cross-FI payment to sub-wallet:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ========== CENTRAL BANK COMPLIANCE CONTROL ==========
+// Endpoints called by Central Bank to enforce compliance
+
+// Freeze a wallet or device (called by Central Bank)
+router.post('/compliance/freeze', async (req, res) => {
+  try {
+    const { entityType, entityId, reason, frozenBy } = req.body;
+    
+    // Import database functions
+    const { freezeWallet, freezeSubWallet } = await import('../database.js');
+    
+    if (entityType === 'wallet') {
+      await freezeWallet(entityId, reason, frozenBy);
+      console.log(`🔒 WALLET FROZEN BY CB: ${entityId} - ${reason}`);
+    } else if (entityType === 'iot_device' || entityType === 'subwallet') {
+      await freezeSubWallet(entityId, reason, frozenBy);
+      console.log(`🔒 DEVICE/SUB-WALLET FROZEN BY CB: ${entityId} - ${reason}`);
+    }
+    
+    res.json({ success: true, frozen: true, entityType, entityId });
+  } catch (error) {
+    console.error('Error freezing entity:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Unfreeze a wallet or device (called by Central Bank)
+router.post('/compliance/unfreeze', async (req, res) => {
+  try {
+    const { entityType, entityId } = req.body;
+    
+    // Import database functions
+    const { unfreezeWallet, unfreezeSubWallet } = await import('../database.js');
+    
+    if (entityType === 'wallet') {
+      await unfreezeWallet(entityId);
+      console.log(`🔓 WALLET UNFROZEN BY CB: ${entityId}`);
+    } else if (entityType === 'iot_device' || entityType === 'subwallet') {
+      await unfreezeSubWallet(entityId);
+      console.log(`🔓 DEVICE/SUB-WALLET UNFROZEN BY CB: ${entityId}`);
+    }
+    
+    res.json({ success: true, unfrozen: true, entityType, entityId });
+  } catch (error) {
+    console.error('Error unfreezing entity:', error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 export default router;

@@ -230,6 +230,35 @@ async function initDB() {
     )
   `);
 
+  // IoT/Sub-wallet offline transactions (stored until sync)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS iot_offline_transactions (
+      id TEXT PRIMARY KEY,
+      sub_wallet_id TEXT NOT NULL,
+      main_wallet_id TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      to_wallet TEXT NOT NULL,
+      to_fi TEXT,
+      amount REAL NOT NULL,
+      description TEXT,
+      tx_type TEXT DEFAULT 'offline',
+      monotonic_counter INTEGER NOT NULL,
+      zkp_proof TEXT,
+      nullifier TEXT,
+      status TEXT DEFAULT 'pending',
+      synced_to_wallet INTEGER DEFAULT 0,
+      synced_to_fi INTEGER DEFAULT 0,
+      synced_to_cb INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')),
+      wallet_synced_at TEXT,
+      fi_synced_at TEXT,
+      cb_synced_at TEXT,
+      FOREIGN KEY (sub_wallet_id) REFERENCES sub_wallets(id),
+      FOREIGN KEY (main_wallet_id) REFERENCES wallets(id),
+      FOREIGN KEY (device_id) REFERENCES iot_devices(id)
+    )
+  `);
+
   // Compliance tracking per wallet
   db.run(`
     CREATE TABLE IF NOT EXISTS compliance_tracking (
@@ -296,6 +325,22 @@ async function initDB() {
   try {
     db.run(`ALTER TABLE sub_wallets ADD COLUMN is_offline INTEGER DEFAULT 0`);
   } catch (e) { /* Column exists */ }
+  
+  // Add freeze columns to wallets if not exists
+  try {
+    db.run(`ALTER TABLE wallets ADD COLUMN is_frozen INTEGER DEFAULT 0`);
+    db.run(`ALTER TABLE wallets ADD COLUMN freeze_reason TEXT`);
+    db.run(`ALTER TABLE wallets ADD COLUMN frozen_by TEXT`);
+    db.run(`ALTER TABLE wallets ADD COLUMN frozen_at TEXT`);
+  } catch (e) { /* Columns exist */ }
+  
+  // Add freeze columns to sub_wallets if not exists
+  try {
+    db.run(`ALTER TABLE sub_wallets ADD COLUMN is_frozen INTEGER DEFAULT 0`);
+    db.run(`ALTER TABLE sub_wallets ADD COLUMN freeze_reason TEXT`);
+    db.run(`ALTER TABLE sub_wallets ADD COLUMN frozen_by TEXT`);
+    db.run(`ALTER TABLE sub_wallets ADD COLUMN frozen_at TEXT`);
+  } catch (e) { /* Columns exist */ }
   
   saveDB();
   console.log(`📦 FI database initialized: ${FI_ID}`);
@@ -453,22 +498,81 @@ export async function getWalletBalance(id) {
   return wallet ? wallet.balance : null;
 }
 
+// ============================================
+// WALLET VALIDATION HELPER
+// ============================================
+const CENTRAL_BANK_URL = process.env.CENTRAL_BANK_URL || 'http://localhost:4000';
+
+// Validate if receiver wallet exists (local wallet, local sub-wallet, or cross-FI via CB)
+export async function validateReceiverWallet(walletId, allowCrossFI = true) {
+  await getDB();
+  
+  // 1. Check if it's a local wallet
+  const localWallet = await getWallet(walletId);
+  if (localWallet) {
+    return { 
+      valid: true, 
+      type: 'wallet', 
+      local: true,
+      name: localWallet.name 
+    };
+  }
+  
+  // 2. Check if it's a local sub-wallet
+  const localSubWallet = await getSubWallet(walletId);
+  if (localSubWallet) {
+    const mainWallet = await getWallet(localSubWallet.main_wallet_id);
+    return { 
+      valid: true, 
+      type: 'sub_wallet', 
+      local: true,
+      name: mainWallet ? `${mainWallet.name} - ${localSubWallet.device_type}` : walletId,
+      main_wallet_id: localSubWallet.main_wallet_id
+    };
+  }
+  
+  // 3. If cross-FI is allowed, check with Central Bank
+  if (allowCrossFI) {
+    try {
+      const response = await fetch(`${CENTRAL_BANK_URL}/api/fi/wallet/validate/${walletId}`);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.valid) {
+          return { 
+            valid: true, 
+            type: data.wallet_type, 
+            local: false,
+            fi_id: data.fi_id,
+            fi_name: data.fi_name,
+            name: data.wallet_name
+          };
+        }
+      }
+    } catch (err) {
+      console.log(`⚠️ CB wallet validation unavailable: ${err.message}`);
+      // If CB is unreachable, don't allow cross-FI transactions
+    }
+  }
+  
+  return { valid: false, error: 'Receiver wallet not found in CBDC system' };
+}
+
 // Transaction Operations
 export async function createTransaction(fromWallet, toWallet, amount, description = '', targetFi = null) {
   await getDB();
   const id = `tx-${uuidv4().slice(0, 8)}`;
   
-  // Validate wallets
+  // Validate sender wallet
   if (fromWallet) {
     const sender = await getWallet(fromWallet);
     if (!sender) throw new Error('Sender wallet not found');
     if (sender.balance < amount) throw new Error('Insufficient balance');
   }
   
-  // For local transfers, validate receiver
-  if (toWallet && !targetFi) {
-    const receiver = await getWallet(toWallet);
-    if (!receiver) throw new Error('Receiver wallet not found');
+  // Validate receiver wallet exists in CBDC system
+  const receiverValidation = await validateReceiverWallet(toWallet, !!targetFi);
+  if (!receiverValidation.valid) {
+    throw new Error(`Invalid receiver: ${receiverValidation.error}. All payments must be to registered wallets or IoT devices.`);
   }
   
   const now = new Date().toISOString();
@@ -480,15 +584,16 @@ export async function createTransaction(fromWallet, toWallet, amount, descriptio
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `, [id, fromWallet, toWallet, amount, txType, description, targetFi, now]);
   
-  // Update balances for local transfers
+  // Update balances for local transfers (receiver must be local wallet)
   if (fromWallet) {
     await updateWalletBalance(fromWallet, -amount);
   }
-  if (toWallet && !targetFi) {
+  if (toWallet && receiverValidation.local && receiverValidation.type === 'wallet') {
     await updateWalletBalance(toWallet, amount);
   }
   
   saveDB();
+  console.log(`✅ Transaction ${id}: ${fromWallet} → ${toWallet} (${receiverValidation.name}) : ₹${amount}`);
   return getTransaction(id);
 }
 
@@ -499,6 +604,12 @@ export async function createOfflineTransaction(fromWallet, toWallet, amount, des
   const sender = await getWallet(fromWallet);
   if (!sender) throw new Error('Sender wallet not found');
   if (sender.balance < amount) throw new Error('Insufficient balance');
+  
+  // Validate receiver exists in CBDC system
+  const receiverValidation = await validateReceiverWallet(toWallet, !!toFi);
+  if (!receiverValidation.valid) {
+    throw new Error(`Invalid receiver: ${receiverValidation.error}. All payments must be to registered wallets or IoT devices.`);
+  }
   
   const id = `offline-tx-${uuidv4().slice(0, 8)}`;
   const now = new Date().toISOString();
@@ -529,6 +640,8 @@ export async function createOfflineTransaction(fromWallet, toWallet, amount, des
   
   saveDB();
   
+  console.log(`✅ Offline TX ${id}: ${fromWallet} → ${toWallet} (${receiverValidation.name}) : ₹${amount}`);
+  
   return {
     id,
     fromWallet,
@@ -538,7 +651,8 @@ export async function createOfflineTransaction(fromWallet, toWallet, amount, des
     description,
     zkpProof,
     status: 'pending',
-    createdAt: now
+    createdAt: now,
+    receiverInfo: receiverValidation
   };
 }
 
@@ -926,6 +1040,7 @@ export async function createSubWallet(mainWalletId, deviceId, allocatedBalance, 
   }
   
   const id = `sub-${uuidv4().slice(0, 8)}`;
+  const txId = `tx-${uuidv4().slice(0, 8)}`;
   const now = new Date().toISOString();
   
   // Deduct from main wallet
@@ -937,6 +1052,13 @@ export async function createSubWallet(mainWalletId, deviceId, allocatedBalance, 
     INSERT INTO sub_wallets (id, main_wallet_id, device_id, device_type, balance, spending_limit, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `, [id, mainWalletId, deviceId, device.device_type, effectiveBalance, effectiveLimit, now, now]);
+  
+  // Record allocation transaction for IoT transaction history
+  db.run(`
+    INSERT INTO transactions (id, from_wallet, to_wallet, amount, transaction_type, description, status, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `, [txId, mainWalletId, id, effectiveBalance, 'sub_wallet_allocation', 
+      `Initial allocation to ${device.device_name || device.device_type} [Sub-wallet: ${id}]`, 'completed', now]);
   
   saveDB();
   
@@ -979,12 +1101,20 @@ export async function allocateToSubWallet(subWalletId, amount) {
     throw new Error('Would exceed sub-wallet spending limit');
   }
   
+  const txId = `tx-${uuidv4().slice(0, 8)}`;
   const now = new Date().toISOString();
   
   db.run(`UPDATE wallets SET balance = balance - ?, updated_at = ? WHERE id = ?`,
     [amount, now, subWallet.main_wallet_id]);
   db.run(`UPDATE sub_wallets SET balance = balance + ?, updated_at = ? WHERE id = ?`,
     [amount, now, subWalletId]);
+  
+  // Record allocation transaction for IoT transaction history
+  db.run(`
+    INSERT INTO transactions (id, from_wallet, to_wallet, amount, transaction_type, description, status, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `, [txId, subWallet.main_wallet_id, subWalletId, amount, 'sub_wallet_allocation', 
+      `Additional allocation to ${subWallet.device_type} [Sub-wallet: ${subWalletId}]`, 'completed', now]);
   
   saveDB();
   return getSubWallet(subWalletId);
@@ -1002,12 +1132,20 @@ export async function returnFromSubWallet(subWalletId, amount = null) {
   const returnAmount = amount || subWallet.balance;
   if (returnAmount > subWallet.balance) throw new Error('Insufficient sub-wallet balance');
   
+  const txId = `tx-${uuidv4().slice(0, 8)}`;
   const now = new Date().toISOString();
   
   db.run(`UPDATE wallets SET balance = balance + ?, updated_at = ? WHERE id = ?`,
     [returnAmount, now, subWallet.main_wallet_id]);
   db.run(`UPDATE sub_wallets SET balance = balance - ?, updated_at = ? WHERE id = ?`,
     [returnAmount, now, subWalletId]);
+  
+  // Record return transaction for IoT transaction history
+  db.run(`
+    INSERT INTO transactions (id, from_wallet, to_wallet, amount, transaction_type, description, status, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `, [txId, subWalletId, subWallet.main_wallet_id, returnAmount, 'sub_wallet_return', 
+      `Funds returned from ${subWallet.device_type} [Sub-wallet: ${subWalletId}]`, 'completed', now]);
   
   saveDB();
   return {
@@ -1554,6 +1692,581 @@ async function getDevice(deviceId) {
   await getDB();
   const result = db.exec(`SELECT * FROM iot_devices WHERE id = ?`, [deviceId]);
   return resultToObject(result);
+}
+
+// ============================================
+// FREEZE/UNFREEZE FUNCTIONS (CB Control)
+// ============================================
+
+// Freeze a wallet
+export async function freezeWallet(walletId, reason, frozenBy = 'central_bank') {
+  await getDB();
+  const now = new Date().toISOString();
+  
+  db.run(`
+    UPDATE wallets SET 
+      is_frozen = 1, 
+      status = 'frozen',
+      freeze_reason = ?,
+      frozen_by = ?,
+      frozen_at = ?,
+      updated_at = ?
+    WHERE id = ?
+  `, [reason, frozenBy, now, now, walletId]);
+  
+  saveDB();
+  console.log(`🔒 Wallet ${walletId} FROZEN by ${frozenBy}: ${reason}`);
+  return { frozen: true, walletId, reason, frozenBy, frozenAt: now };
+}
+
+// Unfreeze a wallet
+export async function unfreezeWallet(walletId) {
+  await getDB();
+  const now = new Date().toISOString();
+  
+  db.run(`
+    UPDATE wallets SET 
+      is_frozen = 0, 
+      status = 'active',
+      freeze_reason = NULL,
+      frozen_by = NULL,
+      frozen_at = NULL,
+      updated_at = ?
+    WHERE id = ?
+  `, [now, walletId]);
+  
+  saveDB();
+  console.log(`🔓 Wallet ${walletId} UNFROZEN`);
+  return { unfrozen: true, walletId };
+}
+
+// Check if wallet is frozen
+export async function isWalletFrozen(walletId) {
+  await getDB();
+  const result = db.exec(`SELECT is_frozen, freeze_reason, frozen_by FROM wallets WHERE id = ?`, [walletId]);
+  if (result.length === 0 || result[0].values.length === 0) return false;
+  return result[0].values[0][0] === 1;
+}
+
+// Freeze a sub-wallet/device
+export async function freezeSubWallet(subWalletId, reason, frozenBy = 'central_bank') {
+  await getDB();
+  const now = new Date().toISOString();
+  
+  db.run(`
+    UPDATE sub_wallets SET 
+      is_frozen = 1, 
+      status = 'frozen',
+      freeze_reason = ?,
+      frozen_by = ?,
+      frozen_at = ?,
+      updated_at = ?
+    WHERE id = ?
+  `, [reason, frozenBy, now, now, subWalletId]);
+  
+  saveDB();
+  console.log(`🔒 Sub-wallet ${subWalletId} FROZEN by ${frozenBy}: ${reason}`);
+  return { frozen: true, subWalletId, reason, frozenBy, frozenAt: now };
+}
+
+// Unfreeze a sub-wallet/device
+export async function unfreezeSubWallet(subWalletId) {
+  await getDB();
+  const now = new Date().toISOString();
+  
+  db.run(`
+    UPDATE sub_wallets SET 
+      is_frozen = 0, 
+      status = 'active',
+      freeze_reason = NULL,
+      frozen_by = NULL,
+      frozen_at = NULL,
+      updated_at = ?
+    WHERE id = ?
+  `, [now, subWalletId]);
+  
+  saveDB();
+  console.log(`🔓 Sub-wallet ${subWalletId} UNFROZEN`);
+  return { unfrozen: true, subWalletId };
+}
+
+// Check if sub-wallet is frozen
+export async function isSubWalletFrozen(subWalletId) {
+  await getDB();
+  const result = db.exec(`SELECT is_frozen FROM sub_wallets WHERE id = ?`, [subWalletId]);
+  if (result.length === 0 || result[0].values.length === 0) return false;
+  return result[0].values[0][0] === 1;
+}
+
+// Get all frozen entities
+export async function getFrozenEntities() {
+  await getDB();
+  
+  const frozenWallets = db.exec(`SELECT id, name, freeze_reason, frozen_by, frozen_at FROM wallets WHERE is_frozen = 1`);
+  const frozenSubWallets = db.exec(`SELECT id, main_wallet_id, device_type, freeze_reason, frozen_by, frozen_at FROM sub_wallets WHERE is_frozen = 1`);
+  
+  return {
+    wallets: frozenWallets.length > 0 ? frozenWallets[0].values.map(v => ({
+      id: v[0], name: v[1], freeze_reason: v[2], frozen_by: v[3], frozen_at: v[4]
+    })) : [],
+    subWallets: frozenSubWallets.length > 0 ? frozenSubWallets[0].values.map(v => ({
+      id: v[0], main_wallet_id: v[1], device_type: v[2], freeze_reason: v[3], frozen_by: v[4], frozen_at: v[5]
+    })) : []
+  };
+}
+
+// ============================================
+// IOT OFFLINE TRANSACTION & SYNC FUNCTIONS
+// ============================================
+
+// Create IoT offline transaction (stored locally until sync)
+export async function createIoTOfflineTransaction(subWalletId, toWallet, amount, description = '', toFi = null, zkpProof = null) {
+  await getDB();
+  const id = `iot-tx-${uuidv4().slice(0, 8)}`;
+  const now = new Date().toISOString();
+  
+  // Get sub-wallet details
+  const subWallet = await getSubWallet(subWalletId);
+  if (!subWallet) {
+    throw new Error('Sub-wallet not found');
+  }
+  
+  // Check if sub-wallet is frozen
+  if (subWallet.is_frozen === 1) {
+    throw new Error('Sub-wallet is frozen');
+  }
+  
+  // Validate receiver exists in CBDC system
+  const receiverValidation = await validateReceiverWallet(toWallet, !!toFi);
+  if (!receiverValidation.valid) {
+    throw new Error(`Invalid receiver: ${receiverValidation.error}. Merchants must have a registered wallet or IoT device to receive payments.`);
+  }
+  
+  // Check balance
+  if (subWallet.balance < amount) {
+    throw new Error(`Insufficient balance: ${subWallet.balance} < ${amount}`);
+  }
+  
+  // Check daily limit
+  const dailySpent = subWallet.daily_spent || 0;
+  const dailyLimit = subWallet.daily_limit || COMPLIANCE_LIMITS.IOT_DEVICE_LIMIT;
+  if (dailySpent + amount > dailyLimit) {
+    throw new Error(`Daily limit exceeded: ${dailySpent + amount} > ${dailyLimit}`);
+  }
+  
+  // Increment monotonic counter
+  const newCounter = (subWallet.monotonic_counter || 0) + 1;
+  
+  // Generate nullifier for double-spend prevention
+  const nullifier = crypto.createHash('sha256')
+    .update(`${subWalletId}||${newCounter}||${amount}||${now}`)
+    .digest('hex');
+  
+  // Deduct from sub-wallet
+  db.run(`
+    UPDATE sub_wallets SET 
+      balance = balance - ?,
+      daily_spent = daily_spent + ?,
+      monotonic_counter = ?,
+      updated_at = ?
+    WHERE id = ?
+  `, [amount, amount, newCounter, now, subWalletId]);
+  
+  // Create offline transaction record
+  db.run(`
+    INSERT INTO iot_offline_transactions 
+    (id, sub_wallet_id, main_wallet_id, device_id, to_wallet, to_fi, amount, description, monotonic_counter, zkp_proof, nullifier, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [id, subWalletId, subWallet.main_wallet_id, subWallet.device_id, toWallet, toFi || null, amount, description, newCounter, zkpProof || null, nullifier, now]);
+  
+  saveDB();
+  
+  console.log(`📱 IoT Offline TX Created: ${subWalletId} → ${toWallet} (${receiverValidation.name}) : ₹${amount} (Counter: ${newCounter})`);
+  
+  return {
+    id,
+    sub_wallet_id: subWalletId,
+    main_wallet_id: subWallet.main_wallet_id,
+    device_id: subWallet.device_id,
+    to_wallet: toWallet,
+    to_wallet_name: receiverValidation.name,
+    to_fi: toFi,
+    amount,
+    monotonic_counter: newCounter,
+    nullifier,
+    status: 'pending',
+    created_at: now,
+    receiverInfo: receiverValidation
+  };
+}
+
+// Get pending IoT offline transactions for a sub-wallet
+export async function getPendingIoTTransactions(subWalletId = null) {
+  await getDB();
+  let query = `SELECT * FROM iot_offline_transactions WHERE synced_to_wallet = 0`;
+  const params = [];
+  
+  if (subWalletId) {
+    query += ` AND sub_wallet_id = ?`;
+    params.push(subWalletId);
+  }
+  
+  query += ` ORDER BY created_at ASC`;
+  
+  const result = db.exec(query, params);
+  if (result.length === 0) return [];
+  
+  const columns = result[0].columns;
+  return result[0].values.map(values => 
+    Object.fromEntries(columns.map((col, i) => [col, values[i]]))
+  );
+}
+
+// Sync IoT transactions to main wallet
+export async function syncIoTToWallet(subWalletId) {
+  await getDB();
+  const now = new Date().toISOString();
+  
+  // Get pending transactions for this sub-wallet
+  const pendingTxs = await getPendingIoTTransactions(subWalletId);
+  
+  if (pendingTxs.length === 0) {
+    return { synced: 0, message: 'No pending transactions' };
+  }
+  
+  const syncedIds = [];
+  const errors = [];
+  
+  for (const tx of pendingTxs) {
+    try {
+      // Check for double-spend using nullifier
+      const existingNullifier = db.exec(`SELECT * FROM nullifiers WHERE nullifier = ?`, [tx.nullifier]);
+      if (existingNullifier.length > 0 && existingNullifier[0].values.length > 0) {
+        errors.push({ id: tx.id, error: 'Double-spend detected' });
+        db.run(`UPDATE iot_offline_transactions SET status = 'rejected' WHERE id = ?`, [tx.id]);
+        continue;
+      }
+      
+      // Register nullifier
+      db.run(`
+        INSERT INTO nullifiers (nullifier, serial_number, wallet_id, transaction_id, amount, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `, [tx.nullifier, `sn-${tx.id}`, tx.main_wallet_id, tx.id, tx.amount, now]);
+      
+      // Create a regular transaction record (using transaction_type instead of type)
+      const txId = `tx-${uuidv4().slice(0, 8)}`;
+      db.run(`
+        INSERT INTO transactions (id, from_wallet, to_wallet, amount, transaction_type, status, description, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `, [txId, tx.sub_wallet_id, tx.to_wallet, tx.amount, 'iot_offline', 'completed', 
+          `IoT offline: ${tx.description || 'Sub-wallet payment'}`, tx.created_at]);
+      
+      // CREDIT THE RECEIVER WALLET - This was missing!
+      const receiverWallet = await getWallet(tx.to_wallet);
+      if (receiverWallet) {
+        db.run(`UPDATE wallets SET balance = balance + ?, updated_at = ? WHERE id = ?`, 
+          [tx.amount, now, tx.to_wallet]);
+        console.log(`💰 Credited ₹${tx.amount} to ${receiverWallet.name} (${tx.to_wallet})`);
+      } else {
+        // Check if receiver is a sub-wallet
+        const receiverSubWallet = await getSubWallet(tx.to_wallet);
+        if (receiverSubWallet) {
+          db.run(`UPDATE sub_wallets SET balance = balance + ?, updated_at = ? WHERE id = ?`,
+            [tx.amount, now, tx.to_wallet]);
+          console.log(`💰 Credited ₹${tx.amount} to sub-wallet ${tx.to_wallet}`);
+        }
+      }
+      
+      // Mark as synced to wallet
+      db.run(`
+        UPDATE iot_offline_transactions SET 
+          synced_to_wallet = 1, 
+          wallet_synced_at = ?,
+          status = 'synced_to_wallet'
+        WHERE id = ?
+      `, [now, tx.id]);
+      
+      syncedIds.push(tx.id);
+      console.log(`✅ IoT TX synced to wallet: ${tx.id}`);
+    } catch (err) {
+      errors.push({ id: tx.id, error: err.message });
+    }
+  }
+  
+  saveDB();
+  
+  return {
+    synced: syncedIds.length,
+    syncedIds,
+    errors,
+    message: `Synced ${syncedIds.length}/${pendingTxs.length} transactions`
+  };
+}
+
+// Get transactions pending sync to FI (from wallet level)
+export async function getTransactionsPendingSyncToFI() {
+  await getDB();
+  
+  // Get regular unsynced transactions (using 'synced' column)
+  const regularTxs = db.exec(`SELECT * FROM transactions WHERE synced = 0 ORDER BY timestamp ASC`);
+  
+  // Get IoT transactions synced to wallet but not to FI
+  const iotTxs = db.exec(`SELECT * FROM iot_offline_transactions WHERE synced_to_wallet = 1 AND synced_to_fi = 0 ORDER BY created_at ASC`);
+  
+  const regular = regularTxs.length > 0 ? regularTxs[0].values.map(v => {
+    const cols = regularTxs[0].columns;
+    return Object.fromEntries(cols.map((col, i) => [col, v[i]]));
+  }) : [];
+  
+  const iot = iotTxs.length > 0 ? iotTxs[0].values.map(v => {
+    const cols = iotTxs[0].columns;
+    const tx = Object.fromEntries(cols.map((col, i) => [col, v[i]]));
+    tx.is_iot_transaction = true;
+    return tx;
+  }) : [];
+  
+  return { regular, iot, total: regular.length + iot.length };
+}
+
+// Mark IoT transactions as synced to FI
+export async function markIoTTransactionsSyncedToFI(txIds) {
+  await getDB();
+  const now = new Date().toISOString();
+  
+  for (const id of txIds) {
+    db.run(`
+      UPDATE iot_offline_transactions SET 
+        synced_to_fi = 1, 
+        fi_synced_at = ?,
+        status = 'synced_to_fi'
+      WHERE id = ?
+    `, [now, id]);
+  }
+  
+  saveDB();
+  return { marked: txIds.length };
+}
+
+// Mark IoT transactions as synced to CB
+export async function markIoTTransactionsSyncedToCB(txIds) {
+  await getDB();
+  const now = new Date().toISOString();
+  
+  for (const id of txIds) {
+    db.run(`
+      UPDATE iot_offline_transactions SET 
+        synced_to_cb = 1, 
+        cb_synced_at = ?,
+        status = 'fully_synced'
+      WHERE id = ?
+    `, [now, id]);
+  }
+  
+  saveDB();
+  return { marked: txIds.length };
+}
+
+// Get all IoT transactions for a wallet (including sub-wallets)
+export async function getWalletIoTTransactions(walletId) {
+  await getDB();
+  
+  const result = db.exec(`
+    SELECT * FROM iot_offline_transactions 
+    WHERE main_wallet_id = ? 
+    ORDER BY created_at DESC
+  `, [walletId]);
+  
+  if (result.length === 0) return [];
+  
+  const columns = result[0].columns;
+  return result[0].values.map(values => 
+    Object.fromEntries(columns.map((col, i) => [col, values[i]]))
+  );
+}
+
+// Get sync status summary
+export async function getSyncStatus() {
+  await getDB();
+  
+  const pendingWallet = db.exec(`SELECT COUNT(*) FROM iot_offline_transactions WHERE synced_to_wallet = 0`);
+  const pendingFI = db.exec(`SELECT COUNT(*) FROM iot_offline_transactions WHERE synced_to_wallet = 1 AND synced_to_fi = 0`);
+  const pendingCB = db.exec(`SELECT COUNT(*) FROM iot_offline_transactions WHERE synced_to_fi = 1 AND synced_to_cb = 0`);
+  const fullySynced = db.exec(`SELECT COUNT(*) FROM iot_offline_transactions WHERE synced_to_cb = 1`);
+  
+  const regularUnsynced = db.exec(`SELECT COUNT(*) FROM transactions WHERE synced = 0`);
+  
+  return {
+    iot: {
+      pending_wallet_sync: pendingWallet[0]?.values[0]?.[0] || 0,
+      pending_fi_sync: pendingFI[0]?.values[0]?.[0] || 0,
+      pending_cb_sync: pendingCB[0]?.values[0]?.[0] || 0,
+      fully_synced: fullySynced[0]?.values[0]?.[0] || 0
+    },
+    regular: {
+      unsynced: regularUnsynced[0]?.values[0]?.[0] || 0
+    }
+  };
+}
+
+// Sync all sub-wallets for a main wallet
+export async function syncAllSubWalletsToWallet(mainWalletId) {
+  await getDB();
+  
+  // Get all sub-wallets for this main wallet
+  const subWallets = db.exec(`SELECT id FROM sub_wallets WHERE main_wallet_id = ?`, [mainWalletId]);
+  
+  if (subWallets.length === 0 || subWallets[0].values.length === 0) {
+    return { synced: 0, message: 'No sub-wallets found' };
+  }
+  
+  let totalSynced = 0;
+  const results = [];
+  
+  for (const [subWalletId] of subWallets[0].values) {
+    const result = await syncIoTToWallet(subWalletId);
+    totalSynced += result.synced;
+    results.push({ subWalletId, ...result });
+  }
+  
+  return {
+    totalSynced,
+    subWalletResults: results,
+    message: `Synced ${totalSynced} transactions from ${subWallets[0].values.length} sub-wallets`
+  };
+}
+
+// ============================================
+// IOT DEVICE TRANSACTION HISTORY
+// ============================================
+
+// Get complete transaction history for a specific sub-wallet/IoT device
+export async function getSubWalletTransactions(subWalletId) {
+  await getDB();
+  
+  // Get sub-wallet details
+  const subWallet = await getSubWallet(subWalletId);
+  if (!subWallet) {
+    throw new Error('Sub-wallet not found');
+  }
+  
+  // Get IoT offline transactions (outgoing from this device)
+  const iotTxsResult = db.exec(`
+    SELECT 
+      id,
+      sub_wallet_id as from_wallet,
+      to_wallet,
+      amount,
+      'iot_offline' as transaction_type,
+      description,
+      monotonic_counter,
+      nullifier,
+      status,
+      created_at as timestamp,
+      synced_to_wallet,
+      synced_to_fi,
+      synced_to_cb,
+      'outgoing' as direction
+    FROM iot_offline_transactions 
+    WHERE sub_wallet_id = ?
+    ORDER BY created_at DESC
+  `, [subWalletId]);
+  
+  // Get outgoing transactions from this sub-wallet in regular transactions table
+  // (These are created by createSubWalletPayment or returnFromSubWallet)
+  const outgoingTxsResult = db.exec(`
+    SELECT 
+      id,
+      from_wallet,
+      to_wallet,
+      amount,
+      transaction_type,
+      description,
+      NULL as monotonic_counter,
+      NULL as nullifier,
+      status,
+      timestamp,
+      synced as synced_to_wallet,
+      synced as synced_to_fi,
+      synced as synced_to_cb,
+      'outgoing' as direction
+    FROM transactions 
+    WHERE (description LIKE ? AND transaction_type = 'sub_wallet_transfer')
+       OR (from_wallet = ? AND transaction_type = 'sub_wallet_return')
+    ORDER BY timestamp DESC
+  `, [`%[Sub-wallet: ${subWalletId}]%`, subWalletId]);
+  
+  // Get incoming transactions where this sub-wallet is the receiver
+  const incomingTxsResult = db.exec(`
+    SELECT 
+      id,
+      from_wallet,
+      to_wallet,
+      amount,
+      transaction_type,
+      description,
+      NULL as monotonic_counter,
+      NULL as nullifier,
+      status,
+      timestamp,
+      synced as synced_to_wallet,
+      synced as synced_to_fi,
+      synced as synced_to_cb,
+      'incoming' as direction
+    FROM transactions 
+    WHERE to_wallet = ? AND transaction_type != 'iot_offline'
+    ORDER BY timestamp DESC
+  `, [subWalletId]);
+  
+  // Convert results to arrays
+  const iotTransactions = iotTxsResult.length > 0 ? iotTxsResult[0].values.map(v => {
+    const cols = iotTxsResult[0].columns;
+    return Object.fromEntries(cols.map((col, i) => [col, v[i]]));
+  }) : [];
+  
+  const outgoingTransactions = outgoingTxsResult.length > 0 ? outgoingTxsResult[0].values.map(v => {
+    const cols = outgoingTxsResult[0].columns;
+    return Object.fromEntries(cols.map((col, i) => [col, v[i]]));
+  }) : [];
+  
+  const incomingTransactions = incomingTxsResult.length > 0 ? incomingTxsResult[0].values.map(v => {
+    const cols = incomingTxsResult[0].columns;
+    return Object.fromEntries(cols.map((col, i) => [col, v[i]]));
+  }) : [];
+  
+  // Merge and sort by timestamp
+  const allTransactions = [...iotTransactions, ...outgoingTransactions, ...incomingTransactions]
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  
+  // Calculate summary
+  const totalOutgoing = allTransactions
+    .filter(tx => tx.direction === 'outgoing')
+    .reduce((sum, tx) => sum + (tx.amount || 0), 0);
+  
+  const totalIncoming = allTransactions
+    .filter(tx => tx.direction === 'incoming')
+    .reduce((sum, tx) => sum + (tx.amount || 0), 0);
+  
+  return {
+    subWallet: {
+      id: subWallet.id,
+      device_type: subWallet.device_type,
+      device_id: subWallet.device_id,
+      main_wallet_id: subWallet.main_wallet_id,
+      balance: subWallet.balance,
+      daily_spent: subWallet.daily_spent,
+      daily_limit: subWallet.daily_limit
+    },
+    transactions: allTransactions,
+    summary: {
+      total_transactions: allTransactions.length,
+      total_outgoing: totalOutgoing,
+      total_incoming: totalIncoming,
+      net_flow: totalIncoming - totalOutgoing,
+      pending_sync: iotTransactions.filter(tx => !tx.synced_to_wallet).length,
+      synced_to_fi: iotTransactions.filter(tx => tx.synced_to_fi).length,
+      synced_to_cb: iotTransactions.filter(tx => tx.synced_to_cb).length
+    }
+  };
 }
 
 // Initialize on import
