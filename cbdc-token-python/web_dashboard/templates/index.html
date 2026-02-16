@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Digital Rupee (e₹) - ZKP Offline CBDC</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .se-badge { background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%); }
+        .zkp-badge { background: linear-gradient(135deg, #7c3aed 0%, #5b21b6 100%); }
+        .flow-line { border-left: 2px dashed #4b5563; }
+    </style>
+</head>
+<body class="bg-slate-900 text-white min-h-screen">
+    <!-- Header with Architecture Diagram -->
+    <header class="bg-gradient-to-r from-emerald-800 to-teal-900 shadow-xl">
+        <div class="max-w-6xl mx-auto px-4 py-6">
+            <div class="flex items-center justify-between">
+                <div>
+                    <h1 class="text-3xl font-bold flex items-center">
+                        <span class="bg-white text-emerald-800 rounded-full w-12 h-12 flex items-center justify-center mr-3 text-xl">e₹</span>
+                        Digital Rupee - Offline CBDC
+                    </h1>
+                    <p class="text-emerald-200 mt-1">ZKP-Based Authentication for Offline Payments Using IoT Devices</p>
+                </div>
+                <div class="text-right">
+                    <p class="text-emerald-200 text-sm">Total Circulation</p>
+                    <p class="text-2xl font-bold" id="total-supply">₹0</p>
+                </div>
+            </div>
+            
+            <!-- Mini Architecture -->
+            <div class="mt-4 bg-slate-800/50 rounded-lg p-3 text-xs">
+                <div class="flex items-center justify-center space-x-2">
+                    <span class="bg-yellow-600 px-2 py-1 rounded">🏛️ Central Bank</span>
+                    <span class="text-yellow-400">→</span>
+                    <span class="bg-blue-600 px-2 py-1 rounded">🏦 FI</span>
+                    <span class="text-blue-400">→</span>
+                    <span class="se-badge px-2 py-1 rounded">👛 Wallet+SE</span>
+                    <span class="text-purple-400">⟷ ZKP</span>
+                    <span class="zkp-badge px-2 py-1 rounded">📱 IoT+SE</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-6xl mx-auto px-4 py-6 space-y-6">
+        
+        <!-- Section 1: Central Bank -->
+        <section class="bg-gradient-to-br from-yellow-900/50 to-amber-900/30 rounded-xl p-5 border border-yellow-700/50">
+            <h2 class="text-xl font-bold text-yellow-400 mb-4 flex items-center">
+                🏛️ Central Bank (RBI) - Token Minting
+            </h2>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <!-- Mint Tokens -->
+                <div class="bg-slate-800 rounded-lg p-4">
+                    <h3 class="font-semibold mb-3">Mint Tokens</h3>
+                    <div class="space-y-2">
+                        <div class="grid grid-cols-5 gap-1 text-xs">
+                            <input type="number" id="m-2000" placeholder="₹2000" class="bg-slate-700 rounded px-1 py-1 text-center" value="0">
+                            <input type="number" id="m-500" placeholder="₹500" class="bg-slate-700 rounded px-1 py-1 text-center" value="0">
+                            <input type="number" id="m-100" placeholder="₹100" class="bg-slate-700 rounded px-1 py-1 text-center" value="0">
+                            <input type="number" id="m-50" placeholder="₹50" class="bg-slate-700 rounded px-1 py-1 text-center" value="0">
+                            <input type="number" id="m-10" placeholder="₹10" class="bg-slate-700 rounded px-1 py-1 text-center" value="0">
+                        </div>
+                        <p class="text-xs text-slate-400">₹2000 | ₹500 | ₹100 | ₹50 | ₹10</p>
+                        <button onclick="mintTokens()" class="w-full bg-yellow-600 hover:bg-yellow-700 py-2 rounded font-semibold text-sm">
+                            🪙 Mint Tokens
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Allocate to FI -->
+                <div class="bg-slate-800 rounded-lg p-4">
+                    <h3 class="font-semibold mb-3">Allocate to FI</h3>
+                    <div class="space-y-2">
+                        <select id="alloc-fi" class="w-full bg-slate-700 rounded px-3 py-2 text-sm">
+                            <option value="sbi">SBI</option>
+                            <option value="hdfc">HDFC</option>
+                        </select>
+                        <input type="number" id="alloc-amount" placeholder="Amount" class="w-full bg-slate-700 rounded px-3 py-2 text-sm">
+                        <button onclick="allocateToFI()" class="w-full bg-blue-600 hover:bg-blue-700 py-2 rounded font-semibold text-sm">
+                            📤 Allocate
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Money Supply -->
+                <div class="bg-slate-800 rounded-lg p-4">
+                    <h3 class="font-semibold mb-3">Money Supply</h3>
+                    <div id="money-supply" class="text-sm space-y-1">
+                        <div class="flex justify-between"><span class="text-slate-400">In Vault:</span><span id="ms-vault">₹0</span></div>
+                        <div class="flex justify-between"><span class="text-slate-400">In FIs:</span><span id="ms-fi" class="text-blue-400">₹0</span></div>
+                        <div class="flex justify-between"><span class="text-slate-400">In Wallets:</span><span id="ms-wallet" class="text-green-400">₹0</span></div>
+                        <div class="flex justify-between"><span class="text-slate-400">In IoT/SE:</span><span id="ms-iot" class="text-purple-400">₹0</span></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 2: Financial Institutions -->
+        <section class="bg-gradient-to-br from-blue-900/50 to-indigo-900/30 rounded-xl p-5 border border-blue-700/50">
+            <h2 class="text-xl font-bold text-blue-400 mb-4">🏦 Financial Institutions</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <!-- SBI -->
+                <div class="bg-slate-800 rounded-lg overflow-hidden">
+                    <div class="bg-blue-800 px-4 py-2 flex justify-between items-center">
+                        <span class="font-bold">SBI (State Bank of India)</span>
+                        <span id="sbi-bal" class="text-blue-200">₹0</span>
+                    </div>
+                    <div class="p-4">
+                        <div id="sbi-wallets" class="space-y-2 max-h-32 overflow-y-auto mb-3 text-sm"></div>
+                        <div class="flex space-x-2">
+                            <input type="text" id="sbi-wallet-name" placeholder="Wallet name" class="flex-1 bg-slate-700 rounded px-3 py-2 text-sm">
+                            <button onclick="createWallet('fi1')" class="bg-green-600 hover:bg-green-700 px-4 py-2 rounded text-sm">+ Create</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- HDFC -->
+                <div class="bg-slate-800 rounded-lg overflow-hidden">
+                    <div class="bg-red-800 px-4 py-2 flex justify-between items-center">
+                        <span class="font-bold">HDFC Bank</span>
+                        <span id="hdfc-bal" class="text-red-200">₹0</span>
+                    </div>
+                    <div class="p-4">
+                        <div id="hdfc-wallets" class="space-y-2 max-h-32 overflow-y-auto mb-3 text-sm"></div>
+                        <div class="flex space-x-2">
+                            <input type="text" id="hdfc-wallet-name" placeholder="Wallet name" class="flex-1 bg-slate-700 rounded px-3 py-2 text-sm">
+                            <button onclick="createWallet('fi2')" class="bg-green-600 hover:bg-green-700 px-4 py-2 rounded text-sm">+ Create</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 3: Wallet Operations (with SE) -->
+        <section class="bg-gradient-to-br from-emerald-900/50 to-green-900/30 rounded-xl p-5 border border-emerald-700/50">
+            <h2 class="text-xl font-bold text-emerald-400 mb-4 flex items-center">
+                👛 User Wallet Operations
+                <span class="ml-2 se-badge text-xs px-2 py-1 rounded">Secure Element</span>
+            </h2>
+            
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <!-- Select Wallet -->
+                <div class="bg-slate-800 rounded-lg p-4">
+                    <h3 class="font-semibold mb-2 text-sm">Select Wallet</h3>
+                    <select id="active-wallet" onchange="loadWalletDetails()" class="w-full bg-slate-700 rounded px-3 py-2 text-sm">
+                        <option value="">-- Select --</option>
+                    </select>
+                    <div id="wallet-info" class="mt-3 text-sm">
+                        <p class="text-slate-400">Balance: <span id="w-balance" class="text-green-400">-</span></p>
+                        <p class="text-slate-400">SE Balance: <span id="w-se-balance" class="text-red-400">-</span></p>
+                    </div>
+                </div>
+                
+                <!-- Credit Wallet -->
+                <div class="bg-slate-800 rounded-lg p-4">
+                    <h3 class="font-semibold mb-2 text-sm">💳 Credit from FI</h3>
+                    <input type="number" id="credit-amount" placeholder="Amount" class="w-full bg-slate-700 rounded px-3 py-2 text-sm mb-2">
+                    <button onclick="creditWallet()" class="w-full bg-green-600 hover:bg-green-700 py-2 rounded text-sm">Credit</button>
+                </div>
+                
+                <!-- Load to SE -->
+                <div class="bg-slate-800 rounded-lg p-4 border-l-4 border-red-500">
+                    <h3 class="font-semibold mb-2 text-sm text-red-400">🔐 Load to SE</h3>
+                    <input type="number" id="se-load-amount" placeholder="Amount" class="w-full bg-slate-700 rounded px-3 py-2 text-sm mb-2">
+                    <button onclick="loadToWalletSE()" class="w-full bg-red-600 hover:bg-red-700 py-2 rounded text-sm">Load to SE</button>
+                </div>
+                
+                <!-- Offline Payment -->
+                <div class="bg-slate-800 rounded-lg p-4 border-l-4 border-purple-500">
+                    <h3 class="font-semibold mb-2 text-sm text-purple-400">⚡ Offline Pay (ZKP)</h3>
+                    <input type="text" id="offline-to" placeholder="To Wallet ID" class="w-full bg-slate-700 rounded px-3 py-2 text-sm mb-2">
+                    <input type="number" id="offline-amount" placeholder="Amount" class="w-full bg-slate-700 rounded px-3 py-2 text-sm mb-2">
+                    <button onclick="walletOfflinePay()" class="w-full zkp-badge hover:opacity-90 py-2 rounded text-sm">Send Offline</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 4: IoT Devices (Sub-wallets with SE) -->
+        <section class="bg-gradient-to-br from-purple-900/50 to-violet-900/30 rounded-xl p-5 border border-purple-700/50">
+            <h2 class="text-xl font-bold text-purple-400 mb-4 flex items-center">
+                📱 IoT Devices (Sub-wallets)
+                <span class="ml-2 se-badge text-xs px-2 py-1 rounded">Secure Element</span>
+                <span class="ml-2 zkp-badge text-xs px-2 py-1 rounded">ZKP Auth</span>
+            </h2>
+            
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <!-- Registered Devices -->
+                <div class="bg-slate-800 rounded-lg p-4 md:col-span-2">
+                    <h3 class="font-semibold mb-3 text-sm">Registered Devices</h3>
+                    <div id="iot-devices" class="grid grid-cols-2 md:grid-cols-3 gap-2 max-h-40 overflow-y-auto">
+                        <p class="text-slate-500 text-sm col-span-full">No devices. Select a wallet first.</p>
+                    </div>
+                </div>
+                
+                <!-- Register Device -->
+                <div class="bg-slate-800 rounded-lg p-4">
+                    <h3 class="font-semibold mb-3 text-sm">Register New Device</h3>
+                    <div class="space-y-2">
+                        <select id="device-type" class="w-full bg-slate-700 rounded px-3 py-2 text-sm">
+                            <option value="smartwatch">⌚ Smartwatch</option>
+                            <option value="smart_ring">💍 Smart Ring</option>
+                            <option value="mobile">📱 Mobile</option>
+                            <option value="pos">🖥️ POS Terminal</option>
+                            <option value="transport">🚌 Transport Card</option>
+                        </select>
+                        <input type="text" id="device-name" placeholder="Device Name" class="w-full bg-slate-700 rounded px-3 py-2 text-sm">
+                        <button onclick="registerDevice()" class="w-full bg-purple-600 hover:bg-purple-700 py-2 rounded text-sm">+ Register</button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Device Operations -->
+            <div id="device-ops" class="mt-4 bg-slate-800 rounded-lg p-4 hidden">
+                <h3 class="font-semibold mb-3 text-sm">Device: <span id="selected-device-name" class="text-purple-400"></span></h3>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <!-- Load to Device SE -->
+                    <div>
+                        <label class="text-xs text-slate-400">Load to Device SE</label>
+                        <div class="flex space-x-2 mt-1">
+                            <input type="number" id="dev-se-amount" placeholder="Amount" class="flex-1 bg-slate-700 rounded px-3 py-2 text-sm">
+                            <button onclick="loadToDeviceSE()" class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded text-sm">Load</button>
+                        </div>
+                    </div>
+                    
+                    <!-- Device Offline Pay -->
+                    <div>
+                        <label class="text-xs text-slate-400">Offline Payment (ZKP)</label>
+                        <div class="flex space-x-2 mt-1">
+                            <input type="text" id="dev-pay-to" placeholder="To" class="flex-1 bg-slate-700 rounded px-3 py-2 text-sm">
+                            <input type="number" id="dev-pay-amount" placeholder="₹" class="w-20 bg-slate-700 rounded px-3 py-2 text-sm">
+                            <button onclick="deviceOfflinePay()" class="zkp-badge hover:opacity-90 px-4 py-2 rounded text-sm">Pay</button>
+                        </div>
+                    </div>
+                    
+                    <!-- Sync -->
+                    <div>
+                        <label class="text-xs text-slate-400">Sync to Network</label>
+                        <button onclick="syncDevice()" class="w-full mt-1 bg-cyan-600 hover:bg-cyan-700 py-2 rounded text-sm">🔄 Sync Device</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 5: Sync & Ledger -->
+        <section class="bg-gradient-to-br from-cyan-900/50 to-teal-900/30 rounded-xl p-5 border border-cyan-700/50">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-bold text-cyan-400">📜 Ledger & Sync</h2>
+                <div class="space-x-2">
+                    <button onclick="syncWallet()" class="bg-cyan-600 hover:bg-cyan-700 px-4 py-2 rounded text-sm">🔄 Sync Wallet</button>
+                    <button onclick="refreshAll()" class="bg-slate-600 hover:bg-slate-700 px-4 py-2 rounded text-sm">⟳ Refresh</button>
+                </div>
+            </div>
+            <div class="bg-slate-800 rounded-lg overflow-hidden">
+                <table class="w-full text-sm">
+                    <thead class="bg-slate-700">
+                        <tr>
+                            <th class="px-3 py-2 text-left">Type</th>
+                            <th class="px-3 py-2 text-left">From</th>
+                            <th class="px-3 py-2 text-left">To</th>
+                            <th class="px-3 py-2 text-right">Amount</th>
+                            <th class="px-3 py-2 text-left">Time</th>
+                        </tr>
+                    </thead>
+                    <tbody id="ledger-body">
+                        <tr><td colspan="5" class="px-3 py-4 text-center text-slate-500">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <footer class="text-center text-slate-500 py-6 text-sm">
+        <p>ZKP-Based Authentication for Offline CBDC Payment System Using IoT Devices</p>
+        <p class="text-xs mt-1">Token-Based | Secure Element | Zero-Knowledge Proofs</p>
+    </footer>
+
+    <script>
+        // State
+        let activeWallet = null;
+        let activeDevice = null;
+        let walletFI = null;
+
+        // Helpers
+        const fmt = (n) => '₹' + (n || 0).toLocaleString('en-IN');
+        const api = async (url, method = 'GET', data = null) => {
+            const opts = { method };
+            if (data) { opts.headers = { 'Content-Type': 'application/json' }; opts.body = JSON.stringify(data); }
+            try { return await (await fetch(url, opts)).json(); } catch (e) { return { error: e.message }; }
+        };
+
+        // Load Data
+        async function loadMoneySupply() {
+            const d = await api('/api/cb/money-supply');
+            document.getElementById('total-supply').textContent = fmt(d.total_minted);
+            const bd = d.breakdown || {};
+            document.getElementById('ms-vault').textContent = fmt(bd.in_cb_vault);
+            document.getElementById('ms-fi').textContent = fmt(bd.in_fis);
+            document.getElementById('ms-wallet').textContent = fmt(bd.in_wallets);
+            document.getElementById('ms-iot').textContent = fmt(bd.in_subwallets);
+        }
+
+        async function loadFIData() {
+            const [sbi, hdfc] = await Promise.all([api('/api/fi1/balance'), api('/api/fi2/balance')]);
+            document.getElementById('sbi-bal').textContent = fmt(sbi.balance);
+            document.getElementById('hdfc-bal').textContent = fmt(hdfc.balance);
+            
+            const [sbiW, hdfcW] = await Promise.all([api('/api/fi1/wallets'), api('/api/fi2/wallets')]);
+            renderFIWallets('sbi', sbiW.wallets || [], 'fi1');
+            renderFIWallets('hdfc', hdfcW.wallets || [], 'fi2');
+            
+            // Update wallet dropdown
+            const select = document.getElementById('active-wallet');
+            select.innerHTML = '<option value="">-- Select Wallet --</option>';
+            (sbiW.wallets || []).forEach(w => {
+                select.innerHTML += `<option value="${w.wallet_id}|fi1">${w.name} (SBI) - ${fmt(w.balance)}</option>`;
+            });
+            (hdfcW.wallets || []).forEach(w => {
+                select.innerHTML += `<option value="${w.wallet_id}|fi2">${w.name} (HDFC) - ${fmt(w.balance)}</option>`;
+            });
+        }
+
+        function renderFIWallets(fi, wallets, fiId) {
+            const el = document.getElementById(`${fi}-wallets`);
+            if (!wallets.length) { el.innerHTML = '<p class="text-slate-500">No wallets</p>'; return; }
+            el.innerHTML = wallets.map(w => `
+                <div class="bg-slate-700 p-2 rounded cursor-pointer hover:bg-slate-600" 
+                     onclick="selectWallet('${w.wallet_id}', '${fiId}')">
+                    <div class="flex justify-between"><span>${w.name}</span><span class="text-green-400">${fmt(w.balance)}</span></div>
+                    <div class="text-xs text-slate-400">${w.wallet_id}</div>
+                </div>
+            `).join('');
+        }
+
+        async function loadLedger() {
+            const d = await api('/api/cb/ledger?limit=10');
+            const tbody = document.getElementById('ledger-body');
+            const ledger = d.ledger || [];
+            if (!ledger.length) { tbody.innerHTML = '<tr><td colspan="5" class="px-3 py-4 text-center text-slate-500">No transactions</td></tr>'; return; }
+            tbody.innerHTML = ledger.map(e => `
+                <tr class="border-t border-slate-700 hover:bg-slate-700/50">
+                    <td class="px-3 py-2 ${e.transaction_type === 'MINT' ? 'text-yellow-400' : e.transaction_type === 'OFFLINE' ? 'text-purple-400' : 'text-blue-400'}">${e.transaction_type}</td>
+                    <td class="px-3 py-2 text-xs text-slate-400">${e.from_entity || '-'}</td>
+                    <td class="px-3 py-2 text-xs text-slate-400">${e.to_entity || '-'}</td>
+                    <td class="px-3 py-2 text-right text-green-400">${fmt(e.total_amount)}</td>
+                    <td class="px-3 py-2 text-xs text-slate-400">${e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : '-'}</td>
+                </tr>
+            `).join('');
+        }
+
+        // Wallet Selection
+        function selectWallet(walletId, fi) {
+            document.getElementById('active-wallet').value = `${walletId}|${fi}`;
+            loadWalletDetails();
+        }
+
+        async function loadWalletDetails() {
+            const val = document.getElementById('active-wallet').value;
+            if (!val) { 
+                activeWallet = null; walletFI = null;
+                document.getElementById('w-balance').textContent = '-';
+                document.getElementById('w-se-balance').textContent = '-';
+                document.getElementById('iot-devices').innerHTML = '<p class="text-slate-500 text-sm col-span-full">No devices. Select a wallet first.</p>';
+                document.getElementById('device-ops').classList.add('hidden');
+                return;
+            }
+            [activeWallet, walletFI] = val.split('|');
+            
+            const w = await api(`/api/${walletFI}/wallet/${activeWallet}`);
+            document.getElementById('w-balance').textContent = fmt(w.balance);
+            document.getElementById('w-se-balance').textContent = fmt(w.se_balance || 0);
+            
+            // Load devices
+            const subs = await api(`/api/${walletFI}/wallet/${activeWallet}/subwallets`);
+            const devices = subs.subwallets || [];
+            const el = document.getElementById('iot-devices');
+            if (!devices.length) { 
+                el.innerHTML = '<p class="text-slate-500 text-sm col-span-full">No IoT devices registered</p>'; 
+            } else {
+                const icons = { smartwatch: '⌚', smart_ring: '💍', mobile: '📱', pos: '🖥️', transport: '🚌' };
+                el.innerHTML = devices.map(d => `
+                    <div onclick="selectDevice('${d.subwallet_id}', '${d.device_name}')" 
+                         class="bg-slate-700 p-2 rounded cursor-pointer hover:bg-slate-600 ${activeDevice === d.subwallet_id ? 'ring-2 ring-purple-400' : ''}">
+                        <div class="font-semibold">${icons[d.device_type] || '📱'} ${d.device_name}</div>
+                        <div class="text-xs text-red-400">SE: ${fmt(d.se_balance || 0)}</div>
+                        <div class="text-xs text-slate-500">${d.subwallet_id.slice(0, 12)}...</div>
+                    </div>
+                `).join('');
+            }
+        }
+
+        function selectDevice(id, name) {
+            activeDevice = id;
+            document.getElementById('selected-device-name').textContent = name;
+            document.getElementById('device-ops').classList.remove('hidden');
+            loadWalletDetails(); // Refresh to show selection
+        }
+
+        // Actions
+        async function mintTokens() {
+            const denoms = { '2000': +document.getElementById('m-2000').value || 0, '500': +document.getElementById('m-500').value || 0, '100': +document.getElementById('m-100').value || 0, '50': +document.getElementById('m-50').value || 0, '10': +document.getElementById('m-10').value || 0 };
+            const hasAny = Object.values(denoms).some(v => v > 0);
+            if (!hasAny) return alert('Enter denomination counts');
+            const r = await api('/api/cb/mint/specific', 'POST', { denominations: denoms });
+            if (r.error) return alert('Error: ' + r.error);
+            alert(`✅ Minted ${r.total_tokens} tokens worth ${fmt(r.total_value)}`);
+            ['m-2000', 'm-500', 'm-100', 'm-50', 'm-10'].forEach(id => document.getElementById(id).value = 0);
+            refreshAll();
+        }
+
+        async function allocateToFI() {
+            const fi = document.getElementById('alloc-fi').value;
+            const amount = +document.getElementById('alloc-amount').value;
+            if (!amount) return alert('Enter amount');
+            const r = await api(`/api/cb/allocate/${fi}`, 'POST', { amount });
+            if (r.error) return alert('Error: ' + r.error);
+            alert(`✅ Allocated ${fmt(amount)} to ${fi.toUpperCase()}`);
+            document.getElementById('alloc-amount').value = '';
+            refreshAll();
+        }
+
+        async function createWallet(fi) {
+            const nameEl = fi === 'fi1' ? 'sbi-wallet-name' : 'hdfc-wallet-name';
+            const name = document.getElementById(nameEl).value;
+            if (!name) return alert('Enter wallet name');
+            const r = await api(`/api/${fi}/wallet/create`, 'POST', { name });
+            if (r.error) return alert('Error: ' + r.error);
+            alert(`✅ Created: ${r.wallet_id}`);
+            document.getElementById(nameEl).value = '';
+            refreshAll();
+        }
+
+        async function creditWallet() {
+            if (!activeWallet) return alert('Select a wallet first');
+            const amount = +document.getElementById('credit-amount').value;
+            if (!amount) return alert('Enter amount');
+            const r = await api(`/api/${walletFI}/wallet/${activeWallet}/credit`, 'POST', { amount });
+            if (r.error) return alert('Error: ' + r.error);
+            alert(`✅ Credited ${fmt(amount)}`);
+            document.getElementById('credit-amount').value = '';
+            loadWalletDetails(); refreshAll();
+        }
+
+        async function loadToWalletSE() {
+            if (!activeWallet) return alert('Select a wallet first');
+            const amount = +document.getElementById('se-load-amount').value;
+            if (!amount) return alert('Enter amount');
+            const r = await api(`/api/${walletFI}/wallet/${activeWallet}/se/load`, 'POST', { amount });
+            if (r.error) return alert('Error: ' + r.error);
+            alert(`✅ Loaded ${fmt(r.loaded_to_se)} to Wallet SE`);
+            document.getElementById('se-load-amount').value = '';
+            loadWalletDetails();
+        }
+
+        async function walletOfflinePay() {
+            if (!activeWallet) return alert('Select a wallet first');
+            const to = document.getElementById('offline-to').value;
+            const amount = +document.getElementById('offline-amount').value;
+            if (!to || !amount) return alert('Fill all fields');
+            const r = await api(`/api/${walletFI}/wallet/${activeWallet}/offline/transaction`, 'POST', { toWallet: to, amount });
+            if (r.error) return alert('Error: ' + r.error);
+            alert(`✅ Offline Payment Sent!\nTx: ${r.transaction_id}\nAmount: ${fmt(r.amount)}\n🔐 ZKP Proof Generated`);
+            document.getElementById('offline-to').value = '';
+            document.getElementById('offline-amount').value = '';
+            loadWalletDetails();
+        }
+
+        async function syncWallet() {
+            if (!activeWallet) return alert('Select a wallet first');
+            const r = await api(`/api/${walletFI}/wallet/${activeWallet}/sync`, 'POST', {});
+            if (r.error) return alert('Error: ' + r.error);
+            alert(`✅ Synced ${r.synced_count} transactions to network`);
+            loadWalletDetails(); loadLedger();
+        }
+
+        async function registerDevice() {
+            if (!activeWallet) return alert('Select a wallet first');
+            const deviceType = document.getElementById('device-type').value;
+            const deviceName = document.getElementById('device-name').value;
+            if (!deviceName) return alert('Enter device name');
+            const r = await api(`/api/${walletFI}/wallet/${activeWallet}/device/register`, 'POST', { deviceType, deviceName, spendingLimit: 1000, seEnabled: true });
+            if (r.error) return alert('Error: ' + r.error);
+            alert(`✅ Registered: ${r.subwallet_id}\nSE Enabled: ${r.se_enabled}`);
+            document.getElementById('device-name').value = '';
+            loadWalletDetails();
+        }
+
+        async function loadToDeviceSE() {
+            if (!activeWallet || !activeDevice) return alert('Select wallet and device');
+            const amount = +document.getElementById('dev-se-amount').value;
+            if (!amount) return alert('Enter amount');
+            const r = await api(`/api/${walletFI}/wallet/${activeWallet}/subwallet/${activeDevice}/se/load`, 'POST', { amount });
+            if (r.error) return alert('Error: ' + r.error);
+            alert(`✅ Loaded ${fmt(r.loaded_to_se)} to Device SE`);
+            document.getElementById('dev-se-amount').value = '';
+            loadWalletDetails();
+        }
+
+        async function deviceOfflinePay() {
+            if (!activeDevice) return alert('Select a device');
+            const to = document.getElementById('dev-pay-to').value;
+            const amount = +document.getElementById('dev-pay-amount').value;
+            if (!to || !amount) return alert('Fill all fields');
+            const r = await api(`/api/${walletFI}/subwallet/${activeDevice}/offline/transaction`, 'POST', { toWallet: to, amount });
+            if (r.error) return alert('Error: ' + r.error);
+            alert(`✅ IoT Offline Payment!\nTx: ${r.transaction_id}\nAmount: ${fmt(r.amount)}\n🔐 ZKP Proof Generated`);
+            document.getElementById('dev-pay-to').value = '';
+            document.getElementById('dev-pay-amount').value = '';
+            loadWalletDetails();
+        }
+
+        async function syncDevice() {
+            if (!activeDevice) return alert('Select a device');
+            const r = await api(`/api/${walletFI}/subwallet/${activeDevice}/sync`, 'POST', {});
+            if (r.error) return alert('Error: ' + r.error);
+            alert(`✅ Synced ${r.synced_count} IoT transactions`);
+            loadWalletDetails(); loadLedger();
+        }
+
+        async function refreshAll() {
+            await Promise.all([loadMoneySupply(), loadFIData(), loadLedger()]);
+            if (activeWallet) loadWalletDetails();
+        }
+
+        // Init
+        refreshAll();
+        setInterval(refreshAll, 30000);
+    </script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+✅ Central Bank database initialized
+🏛️ Central Bank (Token-Based) starting on port 4000
+📜 Valid denominations: [1, 2, 5, 10, 20, 50, 100, 200, 500, 2000]
+ * Serving Flask app 'app'
+ * Debug mode: on
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:4000
+ * Running on http://10.10.33.84:4000
+Press CTRL+C to quit
+ * Restarting with watchdog (fsevents)
+ * Debugger is active!
+ * Debugger PIN: 362-849-520
+/opt/anaconda3/lib/python3.13/multiprocessing/resource_tracker.py:301: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown: {'/mp-5owl5ne4'}
+  warnings.warn(
+/opt/anaconda3/lib/python3.13/multiprocessing/resource_tracker.py:301: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown: {'/mp-9b9rfgml'}
+  warnings.warn(
